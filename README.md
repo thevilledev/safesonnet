@@ -23,11 +23,14 @@ importer, err := safesonnet.NewSafeImporter("jsonnet", []string{
 if err != nil {
     log.Fatal(err)
 }
+// Close is required to release the os.Root file descriptor
 defer importer.Close()
 
 vm := jsonnet.MakeVM()
 vm.Importer(importer)
 ```
+
+Note: Unlike `jsonnet.FileImporter`, `SafeImporter` requires calling `Close()` to release the underlying `os.Root` file descriptor. Always use `defer importer.Close()` after creating the importer.
 
 ## Security
 
