@@ -127,8 +127,6 @@ linters:
   fast: true
 
 linters-settings:
-  gocyclo:
-    max-complexity: 12
   cyclop:
     max-complexity: 12
   depguard:
