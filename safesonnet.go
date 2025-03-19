@@ -1,3 +1,5 @@
+// Package safesonnet provides a secure jsonnet importer that restricts imports to a specified directory.
+// It prevents path traversal attacks and provides a secure boundary for jsonnet imports.
 package safesonnet
 
 import (
@@ -34,8 +36,12 @@ var (
 )
 
 // SafeImporter implements jsonnet.Importer interface that restricts imports to a specific directory.
+// It prevents path traversal attacks by ensuring all imports are within the specified root directory.
+// The importer supports a list of library paths (JPaths) within the root directory,
+// similar to the standard jsonnet importer.
 type SafeImporter struct {
-	JPaths  []string // Library search paths within the root
+	// JPaths is a list of library search paths within the root directory.
+	JPaths  []string
 	root    *os.Root
 	fsCache map[string]*fsCacheEntry
 }
@@ -46,6 +52,12 @@ type fsCacheEntry struct {
 }
 
 // NewSafeImporter creates a new SafeImporter that restricts imports to the given directory.
+// It validates that all provided JPaths are within the root directory to maintain
+// the security boundary. If no JPaths are provided, the root directory is used as
+// the only search path.
+//
+// rootDir must be a valid directory path or an error will be returned.
+// jpaths should be a list of directories inside rootDir to search for imports.
 func NewSafeImporter(rootDir string, jpaths []string) (*SafeImporter, error) {
 	if rootDir == "" {
 		return nil, ErrEmptyRootDir
@@ -105,6 +117,7 @@ func NewSafeImporter(rootDir string, jpaths []string) (*SafeImporter, error) {
 }
 
 // tryPath attempts to import a file from the root directory.
+// It handles caching of file contents and existence checks.
 func (i *SafeImporter) tryPath(dir, importedPath string) (bool, jsonnet.Contents, string, error) {
 	// Create absolute path for cache key
 	var absPath string
@@ -165,6 +178,7 @@ func (i *SafeImporter) tryPath(dir, importedPath string) (bool, jsonnet.Contents
 }
 
 // getRelativeDir returns the directory that importedFrom is in, relative to the importer's root.
+// This helps resolve relative imports when importing from another file.
 func (i *SafeImporter) getRelativeDir(importedFrom string) (string, error) {
 	if !filepath.IsAbs(importedFrom) {
 		return filepath.Dir(importedFrom), nil
@@ -185,6 +199,7 @@ func (i *SafeImporter) getRelativeDir(importedFrom string) (string, error) {
 }
 
 // tryImport attempts to import from a specific directory.
+// It is a helper function that wraps tryPath with proper error handling.
 func (i *SafeImporter) tryImport(dir, importedPath string) (jsonnet.Contents, string, bool, error) {
 	found, contents, foundHere, err := i.tryPath(dir, importedPath)
 	if err != nil {
@@ -195,6 +210,13 @@ func (i *SafeImporter) tryImport(dir, importedPath string) (jsonnet.Contents, st
 }
 
 // Import implements jsonnet.Importer interface.
+// It searches for the importedPath in several locations in order:
+//  1. Relative to the importing file (if importedFrom is provided)
+//  2. In the root directory (if importedPath is not absolute)
+//  3. In each of the JPaths
+//
+// The method respects the security boundary and will not allow imports from outside
+// the root directory.
 func (i *SafeImporter) Import(importedFrom, importedPath string) (jsonnet.Contents, string, error) {
 	// Try relative to importing file
 	if importedFrom != "" && !filepath.IsAbs(importedPath) {
@@ -236,6 +258,7 @@ func (i *SafeImporter) Import(importedFrom, importedPath string) (jsonnet.Conten
 }
 
 // Close releases resources associated with the importer.
+// This should be called when the importer is no longer needed to prevent resource leaks.
 func (i *SafeImporter) Close() error {
 	if i.root != nil {
 		return i.root.Close()
@@ -245,6 +268,7 @@ func (i *SafeImporter) Close() error {
 }
 
 // isSubpath returns true if sub is a subdirectory of parent.
+// This is used to verify that paths remain within the security boundary.
 func isSubpath(parent, sub string) bool {
 	parent = filepath.Clean(parent)
 	sub = filepath.Clean(sub)
