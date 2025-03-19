@@ -63,12 +63,12 @@ func TestNewSafeImporter(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt // Capture range variable
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			imp, err := NewSafeImporter(tt.rootDir, tt.jpaths)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("NewSafeImporter() error = %v, wantErr %v", err, tt.wantErr)
+
 				return
 			}
 			if err == nil {
@@ -118,7 +118,6 @@ func TestImport_BasicFunctionality(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt // Capture range variable
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -146,6 +145,7 @@ func TestImport_BasicFunctionality(t *testing.T) {
 			contents, _, err := imp.Import(importedFrom, tt.importedPath)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Import() error = %v, wantErr %v", err, tt.wantErr)
+
 				return
 			}
 			if !tt.wantErr && contents.String() != tt.wantContent {
@@ -168,7 +168,9 @@ func TestImport_SecurityBoundary(t *testing.T) {
 	mustWriteFile(t, filepath.Join(outsideDir, "unsafe.jsonnet"), `{z: 3}`)
 
 	// Create symbolic links
-	if err := os.Symlink(filepath.Join(outsideDir, "unsafe.jsonnet"), filepath.Join(tmpDir, "symlink.jsonnet")); err != nil {
+	if err := os.Symlink(
+		filepath.Join(outsideDir, "unsafe.jsonnet"),
+		filepath.Join(tmpDir, "symlink.jsonnet")); err != nil {
 		t.Skipf("Skipping symlink tests: %v", err)
 	}
 
@@ -176,7 +178,7 @@ func TestImport_SecurityBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSafeImporter() error = %v", err)
 	}
-	defer imp.Close()
+	t.Cleanup(func() { imp.Close() })
 
 	tests := []struct {
 		name         string
@@ -211,7 +213,6 @@ func TestImport_SecurityBoundary(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt // Capture range variable
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			_, _, err := imp.Import(tt.importedFrom, tt.importedPath)
@@ -261,13 +262,13 @@ func TestImport_Caching(t *testing.T) {
 	}
 }
 
-// mustWriteFile is a test helper that writes a file or fails the test
+// mustWriteFile is a test helper that writes a file or fails the test.
 func mustWriteFile(t *testing.T, path, content string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("Failed to create directory: %v", err)
 	}
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("Failed to write file: %v", err)
 	}
 }

@@ -48,5 +48,6 @@ func run() error {
 	}
 
 	fmt.Fprintln(os.Stdout, result)
+
 	return nil
 }
