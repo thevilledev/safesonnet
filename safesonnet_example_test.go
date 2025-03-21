@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/google/go-jsonnet"
 	"github.com/thevilledev/safesonnet"
 )
 
@@ -25,7 +26,7 @@ func Example() {
 		return
 	}
 
-	mainJsonnet := `local utils = import 'lib/utils.jsonnet';
+	mainJsonnet := `local utils = import 'utils.jsonnet';
 {
   result: utils.add(40, 2)
 }`
@@ -55,7 +56,7 @@ func Example() {
 	}
 	defer importer.Close()
 
-	// Import a file
+	// First, show how to import a file
 	contents, foundAt, err := importer.Import("", "main.jsonnet")
 	if err != nil {
 		fmt.Printf("Failed to import: %v\n", err)
@@ -66,10 +67,27 @@ func Example() {
 	fmt.Printf("Found file at: %s\n", filepath.Base(foundAt))
 	fmt.Printf("Contents: %s\n", contents.String())
 
+	// Now, evaluate the jsonnet code
+	vm := jsonnet.MakeVM()
+	vm.Importer(importer)
+
+	// Evaluate the jsonnet code directly
+	result, err := vm.EvaluateAnonymousSnippet("example.jsonnet", mainJsonnet)
+	if err != nil {
+		fmt.Printf("Failed to evaluate: %v\n", err)
+
+		return
+	}
+
+	fmt.Printf("Evaluated result: %s\n", result)
+
 	// Output:
 	// Found file at: main.jsonnet
-	// Contents: local utils = import 'lib/utils.jsonnet';
+	// Contents: local utils = import 'utils.jsonnet';
 	// {
 	//   result: utils.add(40, 2)
+	// }
+	// Evaluated result: {
+	//    "result": 42
 	// }
 }
