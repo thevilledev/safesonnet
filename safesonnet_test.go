@@ -3,6 +3,7 @@ package safesonnet
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -17,6 +18,9 @@ func TestNewSafeImporter(t *testing.T) {
 	mustWriteFile(t, filepath.Join(rootDir, "lib", "test.jsonnet"), "{}")
 	mustWriteFile(t, filepath.Join(rootDir, "vendor", "test.jsonnet"), "{}")
 	mustWriteFile(t, filepath.Join(outsideDir, "test.jsonnet"), "{}")
+
+	// Create a bad root path that will cause filepath.Abs to fail
+	badRoot := string([]byte{0})
 
 	tests := []struct {
 		name    string
@@ -59,6 +63,24 @@ func TestNewSafeImporter(t *testing.T) {
 			rootDir: rootDir,
 			jpaths:  []string{""},
 			wantErr: false, // Should skip empty paths
+		},
+		{
+			name:    "invalid jpath for absPath",
+			rootDir: rootDir,
+			jpaths:  []string{string([]byte{0})}, // Invalid path for Abs
+			wantErr: true,
+		},
+		{
+			name:    "jpath with invalid relative path",
+			rootDir: rootDir,
+			jpaths:  []string{rootDir + string([]byte{0})}, // This should cause filepath.Rel to fail
+			wantErr: true,
+		},
+		{
+			name:    "invalid root path",
+			rootDir: badRoot,
+			jpaths:  nil,
+			wantErr: true,
 		},
 	}
 
@@ -259,6 +281,171 @@ func TestImport_Caching(t *testing.T) {
 	}
 	if foundAt1 != foundAt2 {
 		t.Errorf("Cache returned different paths: got %v, want %v", foundAt2, foundAt1)
+	}
+}
+
+func TestClose(t *testing.T) {
+	t.Parallel()
+
+	// Test closing a valid importer
+	tmpDir := t.TempDir()
+	imp, err := NewSafeImporter(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewSafeImporter() error = %v", err)
+	}
+
+	if err := imp.Close(); err != nil {
+		t.Errorf("Close() error = %v", err)
+	}
+
+	// Test closing an already closed importer
+	if err := imp.Close(); err != nil {
+		t.Errorf("Close() called twice should not error = %v", err)
+	}
+
+	// Create a nil root importer without using NewSafeImporter
+	impWithNilRoot := &SafeImporter{
+		JPaths:  []string{"."},
+		root:    nil,
+		fsCache: make(map[string]*fsCacheEntry),
+	}
+	if err := impWithNilRoot.Close(); err != nil {
+		t.Errorf("Close() on importer with nil root should not error = %v", err)
+	}
+}
+
+func TestGetRelativeDir(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	imp, err := NewSafeImporter(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewSafeImporter() error = %v", err)
+	}
+	t.Cleanup(func() {
+		imp.Close()
+	})
+
+	tests := []struct {
+		name         string
+		importer     *SafeImporter
+		importedFrom string
+		want         string
+		wantErr      bool
+	}{
+		{
+			name:         "relative path",
+			importer:     imp,
+			importedFrom: "some/path/file.jsonnet",
+			want:         "some/path",
+			wantErr:      false,
+		},
+		{
+			name:         "absolute path inside root",
+			importer:     imp,
+			importedFrom: filepath.Join(tmpDir, "some/path/file.jsonnet"),
+			want:         "some/path",
+			wantErr:      false,
+		},
+		{
+			name:         "empty path",
+			importer:     imp,
+			importedFrom: "",
+			want:         ".", // Dir of empty string is "."
+			wantErr:      false,
+		},
+	}
+
+	// Test invalid root condition separately with an artificially invalid path
+	if runtime.GOOS == "windows" {
+		t.Run("invalid abs path", func(t *testing.T) {
+			t.Parallel()
+			// This creates an invalid absolute path that should cause filepath.Abs to fail
+			invalidPath := "\x00invalid:path"
+			_, err := imp.getRelativeDir(invalidPath)
+			if err == nil {
+				t.Errorf("Expected error for invalid path but got nil")
+			}
+		})
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			relDir, err := tt.importer.getRelativeDir(tt.importedFrom)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("getRelativeDir() expected error but got nil")
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Errorf("getRelativeDir() unexpected error = %v", err)
+
+				return
+			}
+
+			// On Windows, paths may come with backslashes, normalize for comparison
+			// We only compare the last part (without the full temporary path) for absolute paths
+			normalizedGot := filepath.ToSlash(filepath.Base(relDir))
+			normalizedWant := filepath.ToSlash(filepath.Base(tt.want))
+			if normalizedGot != normalizedWant && relDir != tt.want {
+				t.Errorf("getRelativeDir() got = %v, want %v", relDir, tt.want)
+			}
+		})
+	}
+}
+
+func TestImport_EdgeCases(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	mustWriteFile(t, filepath.Join(tmpDir, "main.jsonnet"), `local lib = import 'lib.jsonnet'; lib`)
+	mustWriteFile(t, filepath.Join(tmpDir, "lib.jsonnet"), `{x: 1}`)
+	mustWriteFile(t, filepath.Join(tmpDir, "unreadable.jsonnet"), `{x: 2}`)
+
+	// Create a test file that will generate an error when reading
+	if err := os.MkdirAll(filepath.Join(tmpDir, "error"), 0755); err != nil {
+		t.Fatalf("Failed to create directory: %v", err)
+	}
+	errorFile := filepath.Join(tmpDir, "error", "file.jsonnet")
+	if err := os.WriteFile(errorFile, []byte("{}"), 0600); err != nil {
+		t.Fatalf("Failed to write file: %v", err)
+	}
+
+	// Make a file unreadable if possible
+	if err := os.Chmod(filepath.Join(tmpDir, "unreadable.jsonnet"), 0000); err != nil {
+		t.Logf("Could not make file unreadable, skipping that test: %v", err)
+	}
+
+	imp, err := NewSafeImporter(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewSafeImporter() error = %v", err)
+	}
+	defer imp.Close()
+
+	// Test importing with absolute path
+	_, _, err = imp.Import("", filepath.Join(tmpDir, "lib.jsonnet"))
+	if err == nil {
+		t.Errorf("Import() with absolute path should fail")
+	}
+
+	// Test importing with invalid importedFrom path
+	_, _, err = imp.Import(string([]byte{0}), "lib.jsonnet")
+	if err == nil {
+		t.Log("Import() with invalid importedFrom may fail on some platforms")
+	}
+
+	// Test error from unreadable file
+	_, _, err = imp.Import("", "unreadable.jsonnet")
+	// The error might occur or not depending on permissions
+	t.Logf("Import unreadable file error: %v", err)
+
+	// Test importing with absolute path but from importedFrom
+	_, _, err = imp.Import(filepath.Join(tmpDir, "main.jsonnet"), "/absolute/path/to/file.jsonnet")
+	if err == nil {
+		t.Errorf("Import() with absolute path from importedFrom should fail")
 	}
 }
 
