@@ -1,5 +1,3 @@
-// Package safesonnet provides a secure jsonnet importer that restricts imports to a specified directory.
-// It prevents path traversal attacks and provides a secure boundary for jsonnet imports.
 package safesonnet
 
 import (
@@ -8,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/google/go-jsonnet"
 )
@@ -27,23 +26,29 @@ var (
 	ErrRelPath = errors.New("failed to get relative path of jpath")
 	// ErrReadFile is returned when a file cannot be read.
 	ErrReadFile = errors.New("failed to read file")
+	// ErrOpenFile is returned when a file cannot be opened.
+	ErrOpenFile = errors.New("failed to open file")
 	// ErrRootAbsPath is returned when the root absolute path cannot be obtained.
 	ErrRootAbsPath = errors.New("failed to get root absolute path")
 	// ErrRelPathConversion is returned when a relative path cannot be obtained.
-	ErrRelPathConversion = errors.New("failed to get relative path")
+	ErrRelPathConversion = errors.New("failed to convert path to be relative to root")
 	// ErrFileNotFound is returned when a file is not found in any library path.
 	ErrFileNotFound = errors.New("file not found in any library path")
+	// ErrCloseRootDir is returned when the root directory cannot be closed.
+	ErrCloseRootDir = errors.New("failed to close root directory")
+	// ErrCacheInternalType is returned when the cache contains an unexpected value type.
+	ErrCacheInternalType = errors.New("internal cache error: unexpected type")
 )
 
 // SafeImporter implements jsonnet.Importer interface that restricts imports to a specific directory.
 // It prevents path traversal attacks by ensuring all imports are within the specified root directory.
 // The importer supports a list of library paths (JPaths) within the root directory,
-// similar to the standard jsonnet importer.
+// similar to the standard jsonnet importer. Caches file reads.
 type SafeImporter struct {
 	// JPaths is a list of library search paths within the root directory.
 	JPaths  []string
 	root    *os.Root
-	fsCache map[string]*fsCacheEntry
+	fsCache sync.Map
 }
 
 type fsCacheEntry struct {
@@ -110,14 +115,13 @@ func NewSafeImporter(rootDir string, jpaths []string) (*SafeImporter, error) {
 	}
 
 	return &SafeImporter{
-		JPaths:  cleanJPaths,
-		root:    root,
-		fsCache: make(map[string]*fsCacheEntry),
+		JPaths: cleanJPaths,
+		root:   root,
 	}, nil
 }
 
 // tryPath attempts to import a file from the root directory.
-// It handles caching of file contents and existence checks.
+// It handles caching of file contents and existence checks using sync.Map.
 func (i *SafeImporter) tryPath(dir, importedPath string) (bool, jsonnet.Contents, string, error) {
 	// Create absolute path for cache key
 	var absPath string
@@ -127,8 +131,15 @@ func (i *SafeImporter) tryPath(dir, importedPath string) (bool, jsonnet.Contents
 		absPath = filepath.Join(dir, importedPath)
 	}
 
-	// Check cache first
-	if entry, isCached := i.fsCache[absPath]; isCached {
+	// Check cache first using sync.Map Load
+	if value, isCached := i.fsCache.Load(absPath); isCached {
+		entry, ok := value.(*fsCacheEntry) // Assert type
+		if !ok {
+			// Handle unexpected type in cache - this indicates a programming error or cache corruption.
+			// Returning an error is safer than panicking.
+			// Wrap the static error ErrCacheInternalType
+			return false, jsonnet.Contents{}, "", fmt.Errorf("%w for key %q", ErrCacheInternalType, absPath)
+		}
 		if !entry.exists {
 			return false, jsonnet.Contents{}, "", nil
 		}
@@ -140,7 +151,8 @@ func (i *SafeImporter) tryPath(dir, importedPath string) (bool, jsonnet.Contents
 	var relPath string
 	if filepath.IsAbs(importedPath) {
 		// Absolute paths are not allowed
-		i.fsCache[absPath] = &fsCacheEntry{exists: false}
+		// Cache the negative result using sync.Map Store
+		i.fsCache.Store(absPath, &fsCacheEntry{exists: false})
 
 		return false, jsonnet.Contents{}, "", nil
 	}
@@ -154,25 +166,27 @@ func (i *SafeImporter) tryPath(dir, importedPath string) (bool, jsonnet.Contents
 	f, err := i.root.Open(relPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			i.fsCache[absPath] = &fsCacheEntry{exists: false}
+			// Cache the negative result using sync.Map Store
+			i.fsCache.Store(absPath, &fsCacheEntry{exists: false})
 
 			return false, jsonnet.Contents{}, "", nil
 		}
 
-		return false, jsonnet.Contents{}, "", err
+		return false, jsonnet.Contents{}, "", fmt.Errorf("%w: %q: %w", ErrOpenFile, relPath, err)
 	}
 	defer f.Close()
 
 	data, err := io.ReadAll(f)
 	if err != nil {
-		return false, jsonnet.Contents{}, "", err
+		return false, jsonnet.Contents{}, "", fmt.Errorf("%w: %q: %w", ErrReadFile, relPath, err)
 	}
 
+	// Cache the positive result using sync.Map Store
 	contents := jsonnet.MakeContents(string(data))
-	i.fsCache[absPath] = &fsCacheEntry{
+	i.fsCache.Store(absPath, &fsCacheEntry{
 		exists:   true,
 		contents: contents,
-	}
+	})
 
 	return true, contents, absPath, nil
 }
@@ -203,7 +217,8 @@ func (i *SafeImporter) getRelativeDir(importedFrom string) (string, error) {
 func (i *SafeImporter) tryImport(dir, importedPath string) (jsonnet.Contents, string, bool, error) {
 	found, contents, foundHere, err := i.tryPath(dir, importedPath)
 	if err != nil {
-		return jsonnet.Contents{}, "", false, fmt.Errorf("%w: %w", ErrReadFile, err)
+		// Return error from tryPath directly, it's already wrapped.
+		return jsonnet.Contents{}, "", false, err
 	}
 
 	return contents, foundHere, found, nil
@@ -261,7 +276,11 @@ func (i *SafeImporter) Import(importedFrom, importedPath string) (jsonnet.Conten
 // This should be called when the importer is no longer needed to prevent resource leaks.
 func (i *SafeImporter) Close() error {
 	if i.root != nil {
-		return i.root.Close()
+		err := i.root.Close()
+		if err != nil {
+			// Wrap the error from Close using the new sentinel error
+			return fmt.Errorf("%w: %q: %w", ErrCloseRootDir, i.root.Name(), err)
+		}
 	}
 
 	return nil

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 )
 
@@ -307,7 +308,7 @@ func TestClose(t *testing.T) {
 	impWithNilRoot := &SafeImporter{
 		JPaths:  []string{"."},
 		root:    nil,
-		fsCache: make(map[string]*fsCacheEntry),
+		fsCache: sync.Map{},
 	}
 	if err := impWithNilRoot.Close(); err != nil {
 		t.Errorf("Close() on importer with nil root should not error = %v", err)
