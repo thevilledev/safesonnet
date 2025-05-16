@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 
 	"github.com/google/go-jsonnet"
@@ -38,6 +40,14 @@ var (
 	ErrCloseRootDir = errors.New("failed to close root directory")
 	// ErrCacheInternalType is returned when the cache contains an unexpected value type.
 	ErrCacheInternalType = errors.New("internal cache error: unexpected type")
+	// ErrForbiddenAbsolutePath is returned when an import path is absolute and outside the
+	// root directory.
+	ErrForbiddenAbsolutePath = errors.New("forbidden absolute import path")
+	// ErrForbiddenRelativePathTraversal is returned when a relative import path attempts to
+	// traverse outside the root directory.
+	ErrForbiddenRelativePathTraversal = errors.New("forbidden relative import path traversal")
+	// ErrInvalidNullByte is returned when a path contains a null byte, which is invalid.
+	ErrInvalidNullByte = errors.New("path contains an invalid null byte")
 )
 
 // SafeImporter implements jsonnet.Importer interface that restricts imports to a specific directory.
@@ -46,9 +56,10 @@ var (
 // similar to the standard jsonnet importer. Caches file reads.
 type SafeImporter struct {
 	// JPaths is a list of library search paths within the root directory.
-	JPaths  []string
-	root    *os.Root
-	fsCache sync.Map
+	JPaths      []string
+	root        *os.Root
+	fsCache     sync.Map
+	rootAbsPath string // Absolute path to the root directory
 }
 
 type fsCacheEntry struct {
@@ -86,25 +97,50 @@ func NewSafeImporter(rootDir string, jpaths []string) (*SafeImporter, error) {
 		if jpath == "" {
 			continue
 		}
-		// Convert to absolute path
-		absPath, err := filepath.Abs(jpath)
-		if err != nil {
+
+		// Explicitly check for null bytes in jpath, as these are invalid in paths.
+		if strings.Contains(jpath, "\x00") {
 			root.Close()
 
-			return nil, fmt.Errorf("%w for jpath %q (rootDir %q): %w", ErrAbsPathJPath, jpath, rootDir, err)
+			return nil, fmt.Errorf("%w: jpath %q", ErrInvalidNullByte, jpath)
 		}
+
+		var absJPathCandidate string
+		if filepath.IsAbs(jpath) {
+			absJPathCandidate = filepath.Clean(jpath)
+		} else {
+			// If jpath is relative, it must be joined with rootAbs to make it absolute
+			// *within the context of the rootDir*.
+			absJPathCandidate = filepath.Join(rootAbs, jpath)
+		}
+
 		// Ensure path is within root
-		if !isSubpath(rootAbs, absPath) {
+		if !isSubpath(rootAbs, absJPathCandidate) {
 			root.Close()
 
-			return nil, fmt.Errorf("%w: jpath %q (resolved to %q) is outside root directory %q (resolved to %q)", ErrJPathOutsideRoot, jpath, absPath, rootDir, rootAbs)
+			return nil, fmt.Errorf(
+				"%w: jpath %q (interpreted as %q) is outside root directory %q (resolved to %q)",
+				ErrJPathOutsideRoot,
+				jpath,
+				absJPathCandidate,
+				rootDir,
+				rootAbs,
+			)
 		}
 		// Convert to root-relative path
-		relPath, err := filepath.Rel(rootAbs, absPath)
+		relPath, err := filepath.Rel(rootAbs, absJPathCandidate)
 		if err != nil {
 			root.Close()
 
-			return nil, fmt.Errorf("%w for jpath %q (resolved to %q) relative to root %q (resolved to %q): %w", ErrRelPath, jpath, absPath, rootDir, rootAbs, err)
+			return nil, fmt.Errorf(
+				"%w for jpath %q (interpreted as %q) relative to root %q (resolved to %q): %w",
+				ErrRelPath,
+				jpath,
+				absJPathCandidate,
+				rootDir,
+				rootAbs,
+				err,
+			)
 		}
 		cleanJPaths = append(cleanJPaths, relPath)
 	}
@@ -115,85 +151,143 @@ func NewSafeImporter(rootDir string, jpaths []string) (*SafeImporter, error) {
 	}
 
 	return &SafeImporter{
-		JPaths: cleanJPaths,
-		root:   root,
+		JPaths:      cleanJPaths,
+		root:        root,
+		rootAbsPath: rootAbs, // Store the absolute root path
 	}, nil
+}
+
+// normalizeCacheKey converts the cache key to lowercase on OSes that typically
+// have case-insensitive file systems. This helps prevent duplicate cache entries
+// for the same file accessed with different casings.
+// This is a heuristic and might not cover all edge cases of file system configurations.
+func normalizeCacheKey(path string) string {
+	switch runtime.GOOS {
+	case "windows", "darwin":
+		return strings.ToLower(path)
+	default:
+		return path
+	}
 }
 
 // tryPath attempts to import a file from the root directory.
 // It handles caching of file contents and existence checks using sync.Map.
 func (i *SafeImporter) tryPath(dir, importedPath string) (bool, jsonnet.Contents, string, error) {
-	// Create absolute path for cache key
-	var absPath string
+	// Create a canonical logical path relative to the importer's root. This path is used for
+	// consistent identification of the resource within the importer's context.
+	var logicalPath string
 	if filepath.IsAbs(importedPath) {
-		absPath = importedPath
+		logicalPath = importedPath // This branch is for caching the rejection of absolute import attempts.
 	} else {
-		absPath = filepath.Join(dir, importedPath)
+		logicalPath = filepath.Join(dir, importedPath)
 	}
+	logicalPath = filepath.Clean(logicalPath)
+
+	cacheKey := normalizeCacheKey(logicalPath)
 
 	// Check cache first using sync.Map Load
-	if value, isCached := i.fsCache.Load(absPath); isCached {
+	if value, isCached := i.fsCache.Load(cacheKey); isCached {
 		entry, ok := value.(*fsCacheEntry) // Assert type
 		if !ok {
 			// Handle unexpected type in cache - this indicates a programming error or cache corruption.
 			// Returning an error is safer than panicking.
 			// Wrap the static error ErrCacheInternalType
-			return false, jsonnet.Contents{}, "", fmt.Errorf("%w for key %q", ErrCacheInternalType, absPath)
+			return false, jsonnet.Contents{}, "", fmt.Errorf("%w for key %q", ErrCacheInternalType, cacheKey)
 		}
 		if !entry.exists {
 			return false, jsonnet.Contents{}, "", nil
 		}
 
-		return true, entry.contents, absPath, nil
+		return true, entry.contents, logicalPath, nil
 	}
 
-	// Try to open and read the file
-	var relPath string
+	var relPathToOpen string
+	// Handle absolute paths explicitly first for security checks and potential direct load
 	if filepath.IsAbs(importedPath) {
-		// Absolute paths are not allowed
-		// Cache the negative result using sync.Map Store
-		i.fsCache.Store(absPath, &fsCacheEntry{exists: false})
+		cleanedAbsImportedPath := filepath.Clean(importedPath)
+		if !isSubpath(i.rootAbsPath, cleanedAbsImportedPath) {
+			// Cache the negative result for this forbidden path
+			i.fsCache.Store(cacheKey, &fsCacheEntry{exists: false})
 
-		return false, jsonnet.Contents{}, "", nil
+			return false, jsonnet.Contents{}, "", fmt.Errorf(
+				"%w: path %q (resolved to %q) is outside root directory %q",
+				ErrForbiddenAbsolutePath,
+				importedPath,
+				cleanedAbsImportedPath,
+				i.rootAbsPath,
+			)
+		}
+		// It's an absolute path *within* the root. Attempt to load it relative to root.
+		var err error
+		relPathToOpen, err = filepath.Rel(i.rootAbsPath, cleanedAbsImportedPath)
+		if err != nil {
+			// Should not happen if isSubpath passed, but handle defensively.
+			// Cache as not found to prevent re-evaluation of this problematic Rel call.
+			i.fsCache.Store(cacheKey, &fsCacheEntry{exists: false})
+
+			return false, jsonnet.Contents{}, "", fmt.Errorf(
+				"internal error: failed to make absolute path %q relative to root %q: %w",
+				cleanedAbsImportedPath,
+				i.rootAbsPath,
+				err,
+			)
+		}
+	} else {
+		// For relative paths, join with the search directory (which is relative to root).
+		relPathToOpen = filepath.Clean(filepath.Join(dir, importedPath)) // Ensure it's clean for os.Root
 	}
 
-	// For relative paths, join with the search directory
-	relPath = filepath.Join(dir, importedPath)
-
-	// Clean the path to remove any . or .. components
-	relPath = filepath.Clean(relPath)
-
-	f, err := i.root.Open(relPath)
+	f, err := i.root.Open(relPathToOpen)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// Cache the negative result using sync.Map Store
-			i.fsCache.Store(absPath, &fsCacheEntry{exists: false})
+			// Path does not exist according to os.Root. Check if this was due to traversal outside root.
+			effectiveFullPath := filepath.Clean(filepath.Join(i.rootAbsPath, dir, importedPath))
+			if !isSubpath(i.rootAbsPath, effectiveFullPath) {
+				// Cache the negative result for this forbidden path
+				i.fsCache.Store(cacheKey, &fsCacheEntry{exists: false})
+
+				return false, jsonnet.Contents{}, "", fmt.Errorf(
+					"%w: path %q (in search dir %q, resolved to %q) would be outside root directory %q",
+					ErrForbiddenRelativePathTraversal,
+					importedPath,
+					dir,
+					effectiveFullPath,
+					i.rootAbsPath,
+				)
+			}
+			// It's a genuine "not found" within the allowed scope.
+			i.fsCache.Store(cacheKey, &fsCacheEntry{exists: false})
 
 			return false, jsonnet.Contents{}, "", nil
 		}
-
-		return false, jsonnet.Contents{}, "", fmt.Errorf("%w: %q: %w", ErrOpenFile, relPath, err)
+		// Other error during Open (e.g., permission denied on an existing file within root)
+		return false, jsonnet.Contents{}, "", fmt.Errorf("%w: %q: %w", ErrOpenFile, relPathToOpen, err)
 	}
 	defer f.Close()
 
 	data, err := io.ReadAll(f)
 	if err != nil {
-		return false, jsonnet.Contents{}, "", fmt.Errorf("%w: %q: %w", ErrReadFile, relPath, err)
+		return false, jsonnet.Contents{}, "", fmt.Errorf("%w: %q: %w", ErrReadFile, relPathToOpen, err)
 	}
 
 	// Cache the positive result using sync.Map Store
 	contents := jsonnet.MakeContents(string(data))
-	i.fsCache.Store(absPath, &fsCacheEntry{
+	i.fsCache.Store(cacheKey, &fsCacheEntry{
 		exists:   true,
 		contents: contents,
 	})
 
-	return true, contents, absPath, nil
+	return true, contents, logicalPath, nil
 }
 
 // getRelativeDir returns the directory that importedFrom is in, relative to the importer's root.
 // This helps resolve relative imports when importing from another file.
 func (i *SafeImporter) getRelativeDir(importedFrom string) (string, error) {
+	// Explicitly check for null bytes in importedFrom
+	if strings.Contains(importedFrom, "\x00") {
+		return "", fmt.Errorf("%w: importedFrom %q", ErrInvalidNullByte, importedFrom)
+	}
+
 	if !filepath.IsAbs(importedFrom) {
 		return filepath.Dir(importedFrom), nil
 	}

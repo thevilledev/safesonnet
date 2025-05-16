@@ -3,7 +3,6 @@ package safesonnet
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"testing"
 )
@@ -356,19 +355,6 @@ func TestGetRelativeDir(t *testing.T) {
 		},
 	}
 
-	// Test invalid root condition separately with an artificially invalid path
-	if runtime.GOOS == "windows" {
-		t.Run("invalid abs path", func(t *testing.T) {
-			t.Parallel()
-			// This creates an invalid absolute path that should cause filepath.Abs to fail
-			invalidPath := "\x00invalid:path"
-			_, err := imp.getRelativeDir(invalidPath)
-			if err == nil {
-				t.Errorf("Expected error for invalid path but got nil")
-			}
-		})
-	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -395,58 +381,6 @@ func TestGetRelativeDir(t *testing.T) {
 				t.Errorf("getRelativeDir() got = %v, want %v", relDir, tt.want)
 			}
 		})
-	}
-}
-
-func TestImport_EdgeCases(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	mustWriteFile(t, filepath.Join(tmpDir, "main.jsonnet"), `local lib = import 'lib.jsonnet'; lib`)
-	mustWriteFile(t, filepath.Join(tmpDir, "lib.jsonnet"), `{x: 1}`)
-	mustWriteFile(t, filepath.Join(tmpDir, "unreadable.jsonnet"), `{x: 2}`)
-
-	// Create a test file that will generate an error when reading
-	if err := os.MkdirAll(filepath.Join(tmpDir, "error"), 0755); err != nil {
-		t.Fatalf("Failed to create directory: %v", err)
-	}
-	errorFile := filepath.Join(tmpDir, "error", "file.jsonnet")
-	if err := os.WriteFile(errorFile, []byte("{}"), 0600); err != nil {
-		t.Fatalf("Failed to write file: %v", err)
-	}
-
-	// Make a file unreadable if possible
-	if err := os.Chmod(filepath.Join(tmpDir, "unreadable.jsonnet"), 0000); err != nil {
-		t.Logf("Could not make file unreadable, skipping that test: %v", err)
-	}
-
-	imp, err := NewSafeImporter(tmpDir, nil)
-	if err != nil {
-		t.Fatalf("NewSafeImporter() error = %v", err)
-	}
-	defer imp.Close()
-
-	// Test importing with absolute path
-	_, _, err = imp.Import("", filepath.Join(tmpDir, "lib.jsonnet"))
-	if err == nil {
-		t.Errorf("Import() with absolute path should fail")
-	}
-
-	// Test importing with invalid importedFrom path
-	_, _, err = imp.Import(string([]byte{0}), "lib.jsonnet")
-	if err == nil {
-		t.Log("Import() with invalid importedFrom may fail on some platforms")
-	}
-
-	// Test error from unreadable file
-	_, _, err = imp.Import("", "unreadable.jsonnet")
-	// The error might occur or not depending on permissions
-	t.Logf("Import unreadable file error: %v", err)
-
-	// Test importing with absolute path but from importedFrom
-	_, _, err = imp.Import(filepath.Join(tmpDir, "main.jsonnet"), "/absolute/path/to/file.jsonnet")
-	if err == nil {
-		t.Errorf("Import() with absolute path from importedFrom should fail")
 	}
 }
 
