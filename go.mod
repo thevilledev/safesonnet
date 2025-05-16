@@ -1,6 +1,6 @@
 module github.com/thevilledev/safesonnet
 
-go 1.24.3
+go 1.24.1
 
 require github.com/google/go-jsonnet v0.21.0
 
