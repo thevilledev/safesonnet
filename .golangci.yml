@@ -1,15 +1,5 @@
+version: "2"
 linters:
-  # Enable specific linter
-  # https://golangci-lint.run/usage/linters/#enabled-by-default
-  disable:
-    - testpackage
-    - funlen
-    - gofumpt
-    - gocognit
-    - nestif
-    - wsl
-    - varnamelen
-    - cyclop
   enable:
     - asasalint
     - asciicheck
@@ -26,7 +16,6 @@ linters:
     - dupword
     - durationcheck
     - err113
-    - errcheck
     - errchkjson
     - errname
     - errorlint
@@ -34,7 +23,6 @@ linters:
     - fatcontext
     - forbidigo
     - forcetypeassert
-    - gci
     - ginkgolinter
     - gocheckcompilerdirectives
     - gochecknoglobals
@@ -45,20 +33,15 @@ linters:
     - gocyclo
     - godot
     - godox
-    - gofmt
     - goheader
-    - goimports
     - gomoddirectives
     - gomodguard
     - goprintffuncname
     - gosec
-    - gosimple
     - gosmopolitan
-    - govet
     - grouper
     - importas
     - inamedparam
-    - ineffassign
     - interfacebloat
     - intrange
     - ireturn
@@ -91,7 +74,6 @@ linters:
     - spancheck
     - sqlclosecheck
     - staticcheck
-    - stylecheck
     - tagalign
     - tagliatelle
     - testableexamples
@@ -100,44 +82,52 @@ linters:
     - tparallel
     - unconvert
     - unparam
-    - unused
     - usestdlibvars
     - wastedassign
     - whitespace
     - zerologlint
-  # Enable presets.
-  # https://golangci-lint.run/usage/linters
-  # Default: []
-  presets:
-    - bugs
-    - comment
-    - complexity
-    - error
-    - format
-    - import
-    - metalinter
-    - module
-    - performance
-    - sql
-    - style
-    - test
-    - unused
-  # Enable only fast linters from enabled linters set (first run won't be fast)
-  # Default: false
-  fast: true
-
-linters-settings:
-  cyclop:
-    max-complexity: 12
-  depguard:
-    rules:
-      main:
-        # List of file globs that will match this list of settings to compare against.
-        # Default: $all
-        files:
-          - $all
-        # List of allowed packages.
-        allow:
-          - $gostd
-          - github.com/thevilledev/safesonnet
-          - github.com/google/go-jsonnet
+  disable:
+    - cyclop
+    - funlen
+    - gocognit
+    - nestif
+    - testpackage
+    - varnamelen
+    - wsl
+  settings:
+    cyclop:
+      max-complexity: 12
+    depguard:
+      rules:
+        main:
+          files:
+            - $all
+          allow:
+            - $gostd
+            - github.com/thevilledev/safesonnet
+            - github.com/google/go-jsonnet
+    govet:
+      enable:
+        - nilness
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
