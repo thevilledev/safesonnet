@@ -288,11 +288,12 @@ func (i *SafeImporter) Close() error {
 
 // isSubpath returns true if sub is a subdirectory of parent.
 // This is used to verify that paths remain within the security boundary.
+// parent and sub are expected to be absolute paths.
 func isSubpath(parent, sub string) bool {
 	parent = filepath.Clean(parent)
 	sub = filepath.Clean(sub)
 
-	return parent == sub || sub == "." || (len(sub) > len(parent) &&
+	return parent == sub || (len(sub) > len(parent) &&
 		sub[:len(parent)] == parent &&
 		sub[len(parent)] == filepath.Separator)
 }
