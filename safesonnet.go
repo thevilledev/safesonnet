@@ -79,7 +79,7 @@ func NewSafeImporter(rootDir string, jpaths []string) (*SafeImporter, error) {
 	if err != nil {
 		root.Close()
 
-		return nil, fmt.Errorf("%w: %w", ErrAbsPath, err)
+		return nil, fmt.Errorf("%w for rootDir %q: %w", ErrAbsPath, rootDir, err)
 	}
 
 	for _, jpath := range jpaths {
@@ -91,20 +91,20 @@ func NewSafeImporter(rootDir string, jpaths []string) (*SafeImporter, error) {
 		if err != nil {
 			root.Close()
 
-			return nil, fmt.Errorf("%w: %q: %w", ErrAbsPathJPath, jpath, err)
+			return nil, fmt.Errorf("%w for jpath %q (rootDir %q): %w", ErrAbsPathJPath, jpath, rootDir, err)
 		}
 		// Ensure path is within root
 		if !isSubpath(rootAbs, absPath) {
 			root.Close()
 
-			return nil, fmt.Errorf("%w: %q", ErrJPathOutsideRoot, jpath)
+			return nil, fmt.Errorf("%w: jpath %q (resolved to %q) is outside root directory %q (resolved to %q)", ErrJPathOutsideRoot, jpath, absPath, rootDir, rootAbs)
 		}
 		// Convert to root-relative path
 		relPath, err := filepath.Rel(rootAbs, absPath)
 		if err != nil {
 			root.Close()
 
-			return nil, fmt.Errorf("%w: %q: %w", ErrRelPath, jpath, err)
+			return nil, fmt.Errorf("%w for jpath %q (resolved to %q) relative to root %q (resolved to %q): %w", ErrRelPath, jpath, absPath, rootDir, rootAbs, err)
 		}
 		cleanJPaths = append(cleanJPaths, relPath)
 	}
