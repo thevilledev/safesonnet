@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -362,6 +363,13 @@ func TestGetRelativeDir(t *testing.T) {
 			want:         ".", // Dir of empty string is "."
 			wantErr:      false,
 		},
+		{
+			name:         "path with null byte",
+			importer:     imp,
+			importedFrom: "path/with/\x00/null.jsonnet",
+			want:         "",
+			wantErr:      true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -390,6 +398,302 @@ func TestGetRelativeDir(t *testing.T) {
 				t.Errorf("getRelativeDir() got = %v, want %v", relDir, tt.want)
 			}
 		})
+	}
+}
+
+func TestImport_Concurrency(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	content := `{ "msg": "hello from concurrent test" }`
+	filePath := filepath.Join(tmpDir, "concurrent_test.jsonnet")
+	mustWriteFile(t, filePath, content)
+
+	imp, err := NewSafeImporter(tmpDir, nil, WithLogger(log.New(os.Stdout, "", 0)))
+	if err != nil {
+		t.Fatalf("NewSafeImporter() error = %v", err)
+	}
+	defer imp.Close()
+
+	var wg sync.WaitGroup
+	numGoroutines := 32
+
+	for range numGoroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			importedContent, foundAt, importErr := imp.Import("", filePath)
+			if importErr != nil {
+				t.Errorf("imp.Import() failed in goroutine: %v", importErr)
+
+				return
+			}
+			if importedContent.String() != content {
+				t.Errorf("imp.Import() returned wrong content in goroutine: got %q, want %q", importedContent.String(), content)
+			}
+			if foundAt != filePath {
+				t.Errorf("imp.Import() returned wrong foundAt in goroutine: got %q, want %q", foundAt, filePath)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestImport_EdgeCases(t *testing.T) {
+	t.Parallel()
+
+	// Setup test directories
+	tmpDir := t.TempDir()
+	outsideDir := t.TempDir()
+
+	// Create test directory structure
+	mustWriteFile(t, filepath.Join(tmpDir, "regular.jsonnet"), `{"regular": true}`)
+	mustWriteFile(t, filepath.Join(tmpDir, "lib", "lib_file.jsonnet"), `{"lib": true}`)
+	mustWriteFile(t, filepath.Join(outsideDir, "outside.jsonnet"), `{"outside": true}`)
+
+	// Create importer for testing
+	imp, err := NewSafeImporter(tmpDir, []string{filepath.Join(tmpDir, "lib")}, WithLogger(log.New(os.Stdout, "", 0)))
+	if err != nil {
+		t.Fatalf("NewSafeImporter() error = %v", err)
+	}
+	t.Cleanup(func() { imp.Close() })
+
+	tests := []struct {
+		name         string
+		importedFrom string
+		importedPath string
+		wantErr      bool
+		errorCheck   func(error) bool // Optional function to check specific error
+		setupFn      func()           // Setup function to run before test
+	}{
+		{
+			name:         "null byte in importedPath",
+			importedFrom: "",
+			importedPath: "some\x00file.jsonnet",
+			wantErr:      true,
+		},
+		{
+			name:         "absolute outside path with no importedFrom",
+			importedFrom: "",
+			importedPath: filepath.Join(outsideDir, "outside.jsonnet"),
+			wantErr:      true,
+		},
+		{
+			name:         "attempt to use non-existent jpath as fallback",
+			importedFrom: filepath.Join(tmpDir, "main.jsonnet"),
+			importedPath: "nonexistent.jsonnet", // Doesn't exist in any search path
+			wantErr:      true,
+		},
+		{
+			name:         "JPath fallback finds file",
+			importedFrom: filepath.Join(tmpDir, "main.jsonnet"), // Pretend importing from a file
+			importedPath: "lib_file.jsonnet",                    // This exists in the lib JPath
+			wantErr:      false,
+			setupFn: func() {
+				// Make sure main.jsonnet exists for importing from
+				mustWriteFile(t, filepath.Join(tmpDir, "main.jsonnet"), `local lib = import 'lib_file.jsonnet'; lib`)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if tt.setupFn != nil {
+				tt.setupFn()
+			}
+
+			// For valid tests, check if the file was found
+			contents, foundAt, err := imp.Import(tt.importedFrom, tt.importedPath)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Import() error = %v, wantErr %v", err, tt.wantErr)
+
+				return
+			}
+
+			if err == nil {
+				// For successful imports, verify we got content back
+				if contents.String() == "" {
+					t.Errorf("Import() returned empty contents")
+				}
+				if foundAt == "" {
+					t.Errorf("Import() returned empty foundAt path")
+				}
+			} else if tt.errorCheck != nil && !tt.errorCheck(err) {
+				t.Errorf("Import() error %v doesn't match expected error condition", err)
+			}
+		})
+	}
+}
+
+func TestTryPath(t *testing.T) {
+	t.Parallel()
+
+	// Setup test directory
+	tmpDir := t.TempDir()
+	mustWriteFile(t, filepath.Join(tmpDir, "test.jsonnet"), `{"x": 1}`)
+
+	// Create importer
+	imp, err := NewSafeImporter(tmpDir, nil, WithLogger(log.New(os.Stdout, "", 0)))
+	if err != nil {
+		t.Fatalf("NewSafeImporter() error = %v", err)
+	}
+	defer imp.Close()
+
+	// Test successful lookup
+	found, contents, foundAt, err := imp.tryPath(".", "test.jsonnet")
+	if err != nil {
+		t.Errorf("tryPath() for existing file error = %v", err)
+	}
+	if !found {
+		t.Errorf("tryPath() did not find existing file")
+	}
+	if contents.String() != `{"x": 1}` {
+		t.Errorf("tryPath() contents = %v, want %v", contents.String(), `{"x": 1}`)
+	}
+
+	// Test caching by removing the file and trying to access it again
+	if err := os.Remove(filepath.Join(tmpDir, "test.jsonnet")); err != nil {
+		t.Fatalf("Failed to remove test file: %v", err)
+	}
+
+	found2, contents2, foundAt2, err2 := imp.tryPath(".", "test.jsonnet")
+	if err2 != nil {
+		t.Errorf("tryPath() cached lookup error = %v", err2)
+	}
+	if !found2 {
+		t.Errorf("tryPath() did not find cached file")
+	}
+	if contents2.String() != contents.String() {
+		t.Errorf("tryPath() cached contents = %v, want %v", contents2.String(), contents.String())
+	}
+	if foundAt2 != foundAt {
+		t.Errorf("tryPath() cached foundAt = %v, want %v", foundAt2, foundAt)
+	}
+
+	// Test non-existent file
+	found3, _, _, err3 := imp.tryPath(".", "nonexistent.jsonnet")
+	if err3 != nil {
+		t.Errorf("tryPath() for non-existent file error = %v", err3)
+	}
+	if found3 {
+		t.Errorf("tryPath() found non-existent file")
+	}
+
+	// Test absolute path outside root
+	outsideDir := t.TempDir()
+	found4, _, _, err4 := imp.tryPath(".", outsideDir)
+	if err4 == nil {
+		t.Errorf("tryPath() for outside path should have failed")
+	}
+	if found4 {
+		t.Errorf("tryPath() found outside path which should be forbidden")
+	}
+
+	// Test path traversal
+	found5, _, _, err5 := imp.tryPath(".", "../../../etc/passwd")
+	if err5 == nil {
+		t.Errorf("tryPath() for path traversal should have failed")
+	}
+	if found5 {
+		t.Errorf("tryPath() found path traversal which should be forbidden")
+	}
+}
+
+func TestImport_JPathFallback(t *testing.T) {
+	t.Parallel()
+
+	// Setup test directory structure
+	tmpDir := t.TempDir()
+	mustWriteFile(t, filepath.Join(tmpDir, "main.jsonnet"), `local lib = import 'jpath-only.jsonnet'; lib`)
+	mustWriteFile(t, filepath.Join(tmpDir, "lib", "jpath-only.jsonnet"), `{jpath: true}`)
+
+	// Create importer
+	imp, err := NewSafeImporter(tmpDir, []string{filepath.Join(tmpDir, "lib")}, WithLogger(log.New(os.Stdout, "", 0)))
+	if err != nil {
+		t.Fatalf("NewSafeImporter() error = %v", err)
+	}
+	defer imp.Close()
+
+	// Test the special JPath handling when importedFrom is empty
+	contents, foundAt, err := imp.Import("", "jpath-only.jsonnet")
+	if err != nil {
+		t.Errorf("Import() error = %v", err)
+
+		return
+	}
+	if contents.String() != `{jpath: true}` {
+		t.Errorf("Import() contents = %v, want %v", contents.String(), `{jpath: true}`)
+	}
+
+	// Make sure the file was actually found in the jpath, not the root
+	if !strings.Contains(foundAt, "lib/jpath-only.jsonnet") {
+		t.Errorf("Import() foundAt = %v, expected to contain 'lib/jpath-only.jsonnet'", foundAt)
+	}
+
+	// Test JPath precedence (./ before lib)
+	// First, create the same file in both ./ and lib/ with different content
+	rootContent := `{root: true}`
+	libContent := `{lib: true}`
+	mustWriteFile(t, filepath.Join(tmpDir, "duplicate.jsonnet"), rootContent)
+	mustWriteFile(t, filepath.Join(tmpDir, "lib", "duplicate.jsonnet"), libContent)
+
+	// When doing an initial import (importedFrom=""), the default ./ is searched first
+	contents2, _, err := imp.Import("", "duplicate.jsonnet")
+	if err != nil {
+		t.Errorf("Import() for duplicate error = %v", err)
+
+		return
+	}
+	if contents2.String() != rootContent {
+		t.Errorf("Import() expected root content, got = %v, want %v", contents2.String(), rootContent)
+	}
+
+	// Test error handling for invalid absolute import path
+	invalidAbsPath := filepath.Join(t.TempDir(), "not-in-root.jsonnet")
+	_, _, err = imp.Import("", invalidAbsPath)
+	if err == nil {
+		t.Errorf("Import() with invalid absolute path should have failed")
+	}
+}
+
+func TestImport_ErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	// Setup test directory
+	tmpDir := t.TempDir()
+	mustWriteFile(t, filepath.Join(tmpDir, "test.jsonnet"), `{x: 1}`)
+
+	// Create importer
+	imp, err := NewSafeImporter(tmpDir, []string{filepath.Join(tmpDir, "lib")}, WithLogger(log.New(os.Stdout, "", 0)))
+	if err != nil {
+		t.Fatalf("NewSafeImporter() error = %v", err)
+	}
+	defer imp.Close()
+
+	// Test with invalid absolute path where Rel would fail
+	// This is tricky to simulate - one approach would be to mock the filesystem
+	// functions, but for simplicity we'll just check the coverage report
+
+	// Test with a relative path that would escape the root
+	_, _, err = imp.Import(filepath.Join(tmpDir, "lib", "nested"), "../../../../../../etc/passwd")
+	if err == nil {
+		t.Errorf("Import() with excessive path traversal should fail")
+	}
+
+	// Test with invalid importedFrom
+	_, _, err = imp.Import("invalid\x00path", "test.jsonnet")
+	if err == nil {
+		t.Errorf("Import() with invalid importedFrom should fail")
+	}
+
+	// Test with absolute importedPath when importedFrom is not empty
+	outsideDir := t.TempDir()
+	mustWriteFile(t, filepath.Join(outsideDir, "outside.jsonnet"), `{outside: true}`)
+	_, _, err = imp.Import(filepath.Join(tmpDir, "test.jsonnet"), filepath.Join(outsideDir, "outside.jsonnet"))
+	if err == nil {
+		t.Errorf("Import() with absolute path outside root should fail")
 	}
 }
 
