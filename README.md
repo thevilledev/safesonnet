@@ -6,6 +6,8 @@
 
 SafeSonnet is a secure file importer for [google/go-jsonnet](https://github.com/google/go-jsonnet) that restricts file imports to a specific directory using `os.Root` functionality [introduced in Go 1.24](https://tip.golang.org/doc/go1.24#directory-limited-filesystem-access). This helps prevent path traversal attacks and ensures that Jsonnet imports can only access files within a designated directory.
 
+See [docs/spec.md](docs/spec.md) for the full specification, with differences to the built-in go-jsonnet file importer.
+
 ## Installation
 
 ```bash
