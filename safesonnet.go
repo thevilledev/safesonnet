@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 
@@ -180,19 +179,6 @@ func NewSafeImporter(rootDir string, jpaths []string, opts ...Option) (*SafeImpo
 	return si, nil
 }
 
-// normalizeCacheKey converts the cache key to lowercase on OSes that typically
-// have case-insensitive file systems. This helps prevent duplicate cache entries
-// for the same file accessed with different casings.
-// This is a heuristic and might not cover all edge cases of file system configurations.
-func normalizeCacheKey(path string) string {
-	switch runtime.GOOS {
-	case "windows", "darwin":
-		return strings.ToLower(path)
-	default:
-		return path
-	}
-}
-
 // tryPath attempts to import a file from the root directory.
 // It handles caching of file contents and existence checks using sync.Map.
 func (i *SafeImporter) tryPath(dir, importedPath string) (bool, jsonnet.Contents, string, error) {
@@ -206,10 +192,8 @@ func (i *SafeImporter) tryPath(dir, importedPath string) (bool, jsonnet.Contents
 	}
 	logicalPath = filepath.Clean(logicalPath)
 
-	cacheKey := normalizeCacheKey(logicalPath)
-
 	// Check cache first using sync.Map Load
-	if value, isCached := i.fsCache.Load(cacheKey); isCached {
+	if value, isCached := i.fsCache.Load(logicalPath); isCached {
 		entry, ok := value.(*fsCacheEntry) // Assert type
 		if !ok {
 			// Handle unexpected type in cache - this indicates a programming
@@ -217,7 +201,7 @@ func (i *SafeImporter) tryPath(dir, importedPath string) (bool, jsonnet.Contents
 			// Returning an error is safer than panicking.
 			// Wrap the static error ErrCacheInternalType
 			return false, jsonnet.Contents{}, "", fmt.Errorf(
-				"%w for key %q", ErrCacheInternalType, cacheKey)
+				"%w for key %q", ErrCacheInternalType, logicalPath)
 		}
 		if !entry.exists {
 			return false, jsonnet.Contents{}, "", nil
@@ -232,7 +216,7 @@ func (i *SafeImporter) tryPath(dir, importedPath string) (bool, jsonnet.Contents
 		cleanedAbsImportedPath := filepath.Clean(importedPath)
 		if !isSubpath(i.rootAbsPath, cleanedAbsImportedPath) {
 			// Cache the negative result for this forbidden path
-			i.fsCache.Store(cacheKey, &fsCacheEntry{exists: false})
+			i.fsCache.Store(logicalPath, &fsCacheEntry{exists: false})
 
 			return false, jsonnet.Contents{}, "", fmt.Errorf(
 				"%w: path %q (resolved to %q) is outside root directory %q",
@@ -248,7 +232,7 @@ func (i *SafeImporter) tryPath(dir, importedPath string) (bool, jsonnet.Contents
 		if err != nil {
 			// Should not happen if isSubpath passed, but handle defensively.
 			// Cache as not found to prevent re-evaluation of this problematic Rel call.
-			i.fsCache.Store(cacheKey, &fsCacheEntry{exists: false})
+			i.fsCache.Store(logicalPath, &fsCacheEntry{exists: false})
 
 			return false, jsonnet.Contents{}, "", fmt.Errorf(
 				"internal error: failed to make absolute path %q relative to root %q: %w",
@@ -269,7 +253,7 @@ func (i *SafeImporter) tryPath(dir, importedPath string) (bool, jsonnet.Contents
 			effectiveFullPath := filepath.Clean(filepath.Join(i.rootAbsPath, dir, importedPath))
 			if !isSubpath(i.rootAbsPath, effectiveFullPath) {
 				// Cache the negative result for this forbidden path
-				i.fsCache.Store(cacheKey, &fsCacheEntry{exists: false})
+				i.fsCache.Store(logicalPath, &fsCacheEntry{exists: false})
 
 				return false, jsonnet.Contents{}, "", fmt.Errorf(
 					"%w: path %q (in search dir %q, resolved to %q) would be outside root directory %q",
@@ -281,7 +265,7 @@ func (i *SafeImporter) tryPath(dir, importedPath string) (bool, jsonnet.Contents
 				)
 			}
 			// It's a genuine "not found" within the allowed scope.
-			i.fsCache.Store(cacheKey, &fsCacheEntry{exists: false})
+			i.fsCache.Store(logicalPath, &fsCacheEntry{exists: false})
 
 			return false, jsonnet.Contents{}, "", nil
 		}
@@ -297,7 +281,7 @@ func (i *SafeImporter) tryPath(dir, importedPath string) (bool, jsonnet.Contents
 
 	// Cache the positive result using sync.Map Store
 	contents := jsonnet.MakeContents(string(data))
-	i.fsCache.Store(cacheKey, &fsCacheEntry{
+	i.fsCache.Store(logicalPath, &fsCacheEntry{
 		exists:   true,
 		contents: contents,
 	})
