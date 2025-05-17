@@ -1,6 +1,7 @@
 package safesonnet
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -87,7 +88,7 @@ func TestNewSafeImporter(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			imp, err := NewSafeImporter(tt.rootDir, tt.jpaths)
+			imp, err := NewSafeImporter(tt.rootDir, tt.jpaths, WithLogger(log.New(os.Stdout, "", 0)))
 			if (err != nil) != tt.wantErr {
 				t.Errorf("NewSafeImporter() error = %v, wantErr %v", err, tt.wantErr)
 
@@ -152,7 +153,7 @@ func TestImport_BasicFunctionality(t *testing.T) {
 				tt.setupExtra(tmpDir)
 			}
 
-			imp, err := NewSafeImporter(tmpDir, []string{filepath.Join(tmpDir, "lib")})
+			imp, err := NewSafeImporter(tmpDir, []string{filepath.Join(tmpDir, "lib")}, WithLogger(log.New(os.Stdout, "", 0)))
 			if err != nil {
 				t.Fatalf("NewSafeImporter() error = %v", err)
 			}
@@ -204,7 +205,7 @@ func TestImport_SecurityBoundary(t *testing.T) {
 		t.Skipf("Skipping symlink tests: %v", err)
 	}
 
-	imp, err := NewSafeImporter(tmpDir, []string{filepath.Join(tmpDir, "lib")})
+	imp, err := NewSafeImporter(tmpDir, []string{filepath.Join(tmpDir, "lib")}, WithLogger(log.New(os.Stdout, "", 0)))
 	if err != nil {
 		t.Fatalf("NewSafeImporter() error = %v", err)
 	}
@@ -261,7 +262,7 @@ func TestImport_Caching(t *testing.T) {
 	filePath := filepath.Join(tmpDir, "test.jsonnet")
 	mustWriteFile(t, filePath, content)
 
-	imp, err := NewSafeImporter(tmpDir, nil)
+	imp, err := NewSafeImporter(tmpDir, nil, WithLogger(log.New(os.Stdout, "", 0)))
 	if err != nil {
 		t.Fatalf("NewSafeImporter() error = %v", err)
 	}
@@ -297,7 +298,7 @@ func TestClose(t *testing.T) {
 
 	// Test closing a valid importer
 	tmpDir := t.TempDir()
-	imp, err := NewSafeImporter(tmpDir, nil)
+	imp, err := NewSafeImporter(tmpDir, nil, WithLogger(log.New(os.Stdout, "", 0)))
 	if err != nil {
 		t.Fatalf("NewSafeImporter() error = %v", err)
 	}
@@ -325,7 +326,7 @@ func TestClose(t *testing.T) {
 func TestGetRelativeDir(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
-	imp, err := NewSafeImporter(tmpDir, nil)
+	imp, err := NewSafeImporter(tmpDir, nil, WithLogger(log.New(os.Stdout, "", 0)))
 	if err != nil {
 		t.Fatalf("NewSafeImporter() error = %v", err)
 	}

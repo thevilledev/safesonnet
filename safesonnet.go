@@ -61,11 +61,25 @@ type SafeImporter struct {
 	root        *os.Root
 	fsCache     sync.Map
 	rootAbsPath string // Absolute path to the root directory
+	logger      *log.Logger
 }
 
 type fsCacheEntry struct {
 	contents jsonnet.Contents
 	exists   bool
+}
+
+// Option is a functional option for configuring SafeImporter.
+type Option func(*SafeImporter)
+
+// WithLogger allows providing a custom logger to SafeImporter.
+// If nil is provided, the default discarding logger will be used.
+func WithLogger(logger *log.Logger) Option {
+	return func(si *SafeImporter) {
+		if logger != nil {
+			si.logger = logger
+		}
+	}
 }
 
 // NewSafeImporter creates a new SafeImporter that restricts imports to the given directory.
@@ -75,7 +89,8 @@ type fsCacheEntry struct {
 //
 // rootDir must be a valid directory path or an error will be returned.
 // jpaths should be a list of directories inside rootDir to search for imports.
-func NewSafeImporter(rootDir string, jpaths []string) (*SafeImporter, error) {
+// opts can be used to configure the SafeImporter, e.g., by providing a logger.
+func NewSafeImporter(rootDir string, jpaths []string, opts ...Option) (*SafeImporter, error) {
 	if rootDir == "" {
 		return nil, ErrEmptyRootDir
 	}
@@ -151,11 +166,18 @@ func NewSafeImporter(rootDir string, jpaths []string) (*SafeImporter, error) {
 		cleanJPaths = []string{"."}
 	}
 
-	return &SafeImporter{
+	si := &SafeImporter{
 		JPaths:      cleanJPaths,
 		root:        root,
-		rootAbsPath: rootAbs, // Store the absolute root path
-	}, nil
+		rootAbsPath: rootAbs,                                       // Store the absolute root path
+		logger:      log.New(io.Discard, "[safesonnet-debug] ", 0), // Default to silent
+	}
+
+	for _, opt := range opts {
+		opt(si)
+	}
+
+	return si, nil
 }
 
 // normalizeCacheKey converts the cache key to lowercase on OSes that typically
@@ -328,56 +350,56 @@ func (i *SafeImporter) tryImport(dir, importedPath string) (jsonnet.Contents, st
 // The method respects the security boundary and will not allow imports from outside
 // the root directory.
 func (i *SafeImporter) Import(importedFrom, importedPath string) (jsonnet.Contents, string, error) {
-	log.Printf("SafeImporter.Import CALLED: importedFrom=%q, importedPath=%q, jpaths=%v, rootDir=%q, rootAbsPath=%q\n", importedFrom, importedPath, i.JPaths, i.root.Name(), i.rootAbsPath)
+	i.logger.Printf("SafeImporter.Import CALLED: importedFrom=%q, importedPath=%q, jpaths=%v, rootDir=%q, rootAbsPath=%q\n", importedFrom, importedPath, i.JPaths, i.root.Name(), i.rootAbsPath)
 
 	if importedFrom == "" {
 		// For initial file loads, go-jsonnet provides importedPath which could be CWD-relative or absolute.
 		originalImportedPathIsAbs := filepath.IsAbs(importedPath)
 		absEntrypointPath, err := filepath.Abs(importedPath)
 		if err != nil {
-			log.Printf("SafeImporter.Import: Error resolving initial path %q to absolute: %v\n", importedPath, err)
+			i.logger.Printf("SafeImporter.Import: Error resolving initial path %q to absolute: %v\n", importedPath, err)
 			return jsonnet.Contents{}, "", fmt.Errorf("error resolving initial path %q to absolute: %w", importedPath, err)
 		}
-		log.Printf("SafeImporter.Import: Initial file. Original path %q (isAbs: %t) resolved to absolute %q\n", importedPath, originalImportedPathIsAbs, absEntrypointPath)
+		i.logger.Printf("SafeImporter.Import: Initial file. Original path %q (isAbs: %t) resolved to absolute %q\n", importedPath, originalImportedPathIsAbs, absEntrypointPath)
 
 		// Check if this resolved absolute path is within our importer's root.
 		if isSubpath(i.rootAbsPath, absEntrypointPath) {
 			// It's inside the root. Make it relative to the root for os.Root access.
 			pathForOsRoot, err := filepath.Rel(i.rootAbsPath, absEntrypointPath)
 			if err != nil {
-				log.Printf("SafeImporter.Import: Error making initial abs path %q relative to root %q: %v\n", absEntrypointPath, i.rootAbsPath, err)
+				i.logger.Printf("SafeImporter.Import: Error making initial abs path %q relative to root %q: %v\n", absEntrypointPath, i.rootAbsPath, err)
 				return jsonnet.Contents{}, "", fmt.Errorf("error making initial path %q relative to importer root: %w", absEntrypointPath, err)
 			}
-			log.Printf("SafeImporter.Import: Initial file is IN ROOT. Path for os.Root is %q. Calling tryImport.\n", pathForOsRoot)
+			i.logger.Printf("SafeImporter.Import: Initial file is IN ROOT. Path for os.Root is %q. Calling tryImport.\n", pathForOsRoot)
 
 			contents, _, found, err := i.tryImport(".", pathForOsRoot) // dir is "." as pathForOsRoot is relative to jail root
 			if err != nil {
-				log.Printf("SafeImporter.Import: Error from tryImport for initial file in root (pathForOsRoot %q): %v\n", pathForOsRoot, err)
+				i.logger.Printf("SafeImporter.Import: Error from tryImport for initial file in root (pathForOsRoot %q): %v\n", pathForOsRoot, err)
 				return jsonnet.Contents{}, "", err
 			}
 			if found {
-				log.Printf("SafeImporter.Import: Successfully imported initial file %q (was in root). Returning abs path: %q\n", importedPath, absEntrypointPath)
+				i.logger.Printf("SafeImporter.Import: Successfully imported initial file %q (was in root). Returning abs path: %q\n", importedPath, absEntrypointPath)
 				return contents, absEntrypointPath, nil
 			}
 			// If it was in root but tryImport failed to find it (e.g. a symlink loop within os.Root, or other rare FS issue)
-			log.Printf("SafeImporter.Import: Initial file %q (abs: %q, pathForOsRoot: %q) was IN ROOT but NOT FOUND by tryImport.\n", importedPath, absEntrypointPath, pathForOsRoot)
+			i.logger.Printf("SafeImporter.Import: Initial file %q (abs: %q, pathForOsRoot: %q) was IN ROOT but NOT FOUND by tryImport.\n", importedPath, absEntrypointPath, pathForOsRoot)
 			// Fall through to JPath search for this specific case if desired, or return error.
 			// For now, if it was in root and not found, assume it's a deeper issue or genuinely not there in the jail.
 			// However, tests might expect JPath search even for initial files not at actual jail root.
 			// To satisfy tests like `import_from_library_path` where entrypoint is in JPath:
 			// we MUST fall through to JPath logic if not found by direct path resolution, even if `isSubpath` was true.
-			log.Printf("SafeImporter.Import: Initial file (was in root) not found directly, falling through to JPath search for original path %q.\n", importedPath)
+			i.logger.Printf("SafeImporter.Import: Initial file (was in root) not found directly, falling through to JPath search for original path %q.\n", importedPath)
 		} else { // absEntrypointPath is OUTSIDE i.rootAbsPath
 			// If the *original* path was absolute AND it's outside root, it's a firm error. No JPath search.
 			if originalImportedPathIsAbs {
-				log.Printf("SafeImporter.Import: Initial *originally absolute* path %q (abs: %q) is outside sandboxed root %q. Firm error.\n", importedPath, absEntrypointPath, i.rootAbsPath)
+				i.logger.Printf("SafeImporter.Import: Initial *originally absolute* path %q (abs: %q) is outside sandboxed root %q. Firm error.\n", importedPath, absEntrypointPath, i.rootAbsPath)
 				return jsonnet.Contents{}, "", fmt.Errorf("%w: initial absolute path %q is outside importer root %q",
 					ErrForbiddenAbsolutePath, importedPath, i.rootAbsPath)
 			}
 			// If original path was relative, but its CWD-absolute form is outside our root,
 			// it means the CWD is not aligned with our root for this path.
 			// We should then try to find `importedPath` (the original relative string) via JPaths.
-			log.Printf("SafeImporter.Import: Initial *originally relative* path %q (abs: %q) is outside root. Falling through to JPath search for %q.\n", importedPath, absEntrypointPath, importedPath)
+			i.logger.Printf("SafeImporter.Import: Initial *originally relative* path %q (abs: %q) is outside root. Falling through to JPath search for %q.\n", importedPath, absEntrypointPath, importedPath)
 		}
 		// If we reach here for importedFrom == "", it means either:
 		// - initial path (abs or rel) resolved to be IN root, but direct tryImport didn't find it -> try JPaths for original `importedPath`.
@@ -402,7 +424,7 @@ func (i *SafeImporter) Import(importedFrom, importedPath string) (jsonnet.Conten
 				return contents, filepath.Clean(finalFoundAt), nil
 			}
 		} else { // importedPath is ABSOLUTE (and importedFrom is not empty)
-			log.Printf("SafeImporter.Import: Absolute importPath %q from %q. Passing to tryImport.\n", importedPath, importedFrom)
+			i.logger.Printf("SafeImporter.Import: Absolute importPath %q from %q. Passing to tryImport.\n", importedPath, importedFrom)
 			contents, foundAtLogicFromTryPath, found, err := i.tryImport(".", importedPath)
 			if err != nil {
 				return jsonnet.Contents{}, "", err
@@ -421,7 +443,7 @@ func (i *SafeImporter) Import(importedFrom, importedPath string) (jsonnet.Conten
 	// Fallback to JPaths for:
 	// 1. Initial files (importedFrom == "") if not resolved by direct absolute path logic above.
 	// 2. Regular imports (importedFrom != "") if not found by relative-to-importing-file or direct absolute path logic.
-	log.Printf("SafeImporter.Import: Falling back to JPaths to find %q (original importedPath) from context of %q\n", importedPath, importedFrom)
+	i.logger.Printf("SafeImporter.Import: Falling back to JPaths to find %q (original importedPath) from context of %q\n", importedPath, importedFrom)
 
 	searchPaths := i.JPaths
 	// For an initial file load that falls through to JPath search, ensure "." (the rootDir itself) is considered.
@@ -440,7 +462,7 @@ func (i *SafeImporter) Import(importedFrom, importedPath string) (jsonnet.Conten
 			tempSearchPaths = append(tempSearchPaths, ".")
 			tempSearchPaths = append(tempSearchPaths, i.JPaths...)
 			searchPaths = tempSearchPaths
-			log.Printf("SafeImporter.Import: For initial file, prepended \".\" to JPaths. Effective search: %v\n", searchPaths)
+			i.logger.Printf("SafeImporter.Import: For initial file, prepended \".\" to JPaths. Effective search: %v\n", searchPaths)
 		}
 	}
 
@@ -455,12 +477,12 @@ func (i *SafeImporter) Import(importedFrom, importedPath string) (jsonnet.Conten
 				finalFoundAt = filepath.Join(i.rootAbsPath, finalFoundAt)
 			}
 			currentFoundAt := filepath.Clean(finalFoundAt)
-			log.Printf("SafeImporter.Import: Found %q in JPath %q (effective). Returning abs path: %q\n", importedPath, jpath, currentFoundAt)
+			i.logger.Printf("SafeImporter.Import: Found %q in JPath %q (effective). Returning abs path: %q\n", importedPath, jpath, currentFoundAt)
 			return contents, currentFoundAt, nil
 		}
 	}
 
-	log.Printf("SafeImporter.Import: Failed to find %q from %q after all attempts. Returning ErrFileNotFound.\n", importedPath, importedFrom)
+	i.logger.Printf("SafeImporter.Import: Failed to find %q from %q after all attempts. Returning ErrFileNotFound.\n", importedPath, importedFrom)
 	return jsonnet.Contents{}, "", ErrFileNotFound
 }
 
