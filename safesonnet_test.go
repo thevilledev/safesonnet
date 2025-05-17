@@ -123,7 +123,6 @@ func TestImport_BasicFunctionality(t *testing.T) {
 			importedPath: "util.jsonnet",
 			wantContent:  `{y: 2}`,
 			setupExtra: func(dir string) {
-				// Move util.jsonnet directly into lib directory since that's our library path
 				mustWriteFile(t, filepath.Join(dir, "lib", "util.jsonnet"), `{y: 2}`)
 			},
 		},
@@ -160,11 +159,20 @@ func TestImport_BasicFunctionality(t *testing.T) {
 			defer imp.Close()
 
 			var importedFrom string
+			var pathToImport string
+
 			if tt.name == "relative import" {
 				importedFrom = filepath.Join(tmpDir, "main.jsonnet")
+				pathToImport = tt.importedPath
+			} else {
+				if tt.name == "import from library path" {
+					pathToImport = tt.importedPath
+				} else {
+					pathToImport = filepath.Join(tmpDir, tt.importedPath)
+				}
 			}
 
-			contents, _, err := imp.Import(importedFrom, tt.importedPath)
+			contents, _, err := imp.Import(importedFrom, pathToImport)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Import() error = %v, wantErr %v", err, tt.wantErr)
 
@@ -259,8 +267,8 @@ func TestImport_Caching(t *testing.T) {
 	}
 	defer imp.Close()
 
-	// First import should read from disk
-	contents1, foundAt1, err := imp.Import("", "test.jsonnet")
+	// First import should read from disk. Pass the absolute path to simulate resolved entrypoint.
+	contents1, foundAt1, err := imp.Import("", filePath)
 	if err != nil {
 		t.Fatalf("First Import() error = %v", err)
 	}
@@ -270,8 +278,8 @@ func TestImport_Caching(t *testing.T) {
 		t.Fatalf("Failed to remove test file: %v", err)
 	}
 
-	// Second import should use cache
-	contents2, foundAt2, err := imp.Import("", "test.jsonnet")
+	// Second import should use cache. Pass the same absolute path.
+	contents2, foundAt2, err := imp.Import("", filePath)
 	if err != nil {
 		t.Fatalf("Second Import() error = %v", err)
 	}

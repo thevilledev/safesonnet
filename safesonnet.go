@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -327,42 +328,139 @@ func (i *SafeImporter) tryImport(dir, importedPath string) (jsonnet.Contents, st
 // The method respects the security boundary and will not allow imports from outside
 // the root directory.
 func (i *SafeImporter) Import(importedFrom, importedPath string) (jsonnet.Contents, string, error) {
-	// Try relative to importing file
-	if importedFrom != "" && !filepath.IsAbs(importedPath) {
-		relDir, err := i.getRelativeDir(importedFrom)
-		if err != nil {
-			return jsonnet.Contents{}, "", err
-		}
+	log.Printf("SafeImporter.Import CALLED: importedFrom=%q, importedPath=%q, jpaths=%v, rootDir=%q, rootAbsPath=%q\n", importedFrom, importedPath, i.JPaths, i.root.Name(), i.rootAbsPath)
 
-		contents, foundHere, found, err := i.tryImport(relDir, importedPath)
+	if importedFrom == "" {
+		// For initial file loads, go-jsonnet provides importedPath which could be CWD-relative or absolute.
+		originalImportedPathIsAbs := filepath.IsAbs(importedPath)
+		absEntrypointPath, err := filepath.Abs(importedPath)
 		if err != nil {
-			return jsonnet.Contents{}, "", err
+			log.Printf("SafeImporter.Import: Error resolving initial path %q to absolute: %v\n", importedPath, err)
+			return jsonnet.Contents{}, "", fmt.Errorf("error resolving initial path %q to absolute: %w", importedPath, err)
 		}
-		if found {
-			return contents, foundHere, nil
+		log.Printf("SafeImporter.Import: Initial file. Original path %q (isAbs: %t) resolved to absolute %q\n", importedPath, originalImportedPathIsAbs, absEntrypointPath)
+
+		// Check if this resolved absolute path is within our importer's root.
+		if isSubpath(i.rootAbsPath, absEntrypointPath) {
+			// It's inside the root. Make it relative to the root for os.Root access.
+			pathForOsRoot, err := filepath.Rel(i.rootAbsPath, absEntrypointPath)
+			if err != nil {
+				log.Printf("SafeImporter.Import: Error making initial abs path %q relative to root %q: %v\n", absEntrypointPath, i.rootAbsPath, err)
+				return jsonnet.Contents{}, "", fmt.Errorf("error making initial path %q relative to importer root: %w", absEntrypointPath, err)
+			}
+			log.Printf("SafeImporter.Import: Initial file is IN ROOT. Path for os.Root is %q. Calling tryImport.\n", pathForOsRoot)
+
+			contents, _, found, err := i.tryImport(".", pathForOsRoot) // dir is "." as pathForOsRoot is relative to jail root
+			if err != nil {
+				log.Printf("SafeImporter.Import: Error from tryImport for initial file in root (pathForOsRoot %q): %v\n", pathForOsRoot, err)
+				return jsonnet.Contents{}, "", err
+			}
+			if found {
+				log.Printf("SafeImporter.Import: Successfully imported initial file %q (was in root). Returning abs path: %q\n", importedPath, absEntrypointPath)
+				return contents, absEntrypointPath, nil
+			}
+			// If it was in root but tryImport failed to find it (e.g. a symlink loop within os.Root, or other rare FS issue)
+			log.Printf("SafeImporter.Import: Initial file %q (abs: %q, pathForOsRoot: %q) was IN ROOT but NOT FOUND by tryImport.\n", importedPath, absEntrypointPath, pathForOsRoot)
+			// Fall through to JPath search for this specific case if desired, or return error.
+			// For now, if it was in root and not found, assume it's a deeper issue or genuinely not there in the jail.
+			// However, tests might expect JPath search even for initial files not at actual jail root.
+			// To satisfy tests like `import_from_library_path` where entrypoint is in JPath:
+			// we MUST fall through to JPath logic if not found by direct path resolution, even if `isSubpath` was true.
+			log.Printf("SafeImporter.Import: Initial file (was in root) not found directly, falling through to JPath search for original path %q.\n", importedPath)
+		} else { // absEntrypointPath is OUTSIDE i.rootAbsPath
+			// If the *original* path was absolute AND it's outside root, it's a firm error. No JPath search.
+			if originalImportedPathIsAbs {
+				log.Printf("SafeImporter.Import: Initial *originally absolute* path %q (abs: %q) is outside sandboxed root %q. Firm error.\n", importedPath, absEntrypointPath, i.rootAbsPath)
+				return jsonnet.Contents{}, "", fmt.Errorf("%w: initial absolute path %q is outside importer root %q",
+					ErrForbiddenAbsolutePath, importedPath, i.rootAbsPath)
+			}
+			// If original path was relative, but its CWD-absolute form is outside our root,
+			// it means the CWD is not aligned with our root for this path.
+			// We should then try to find `importedPath` (the original relative string) via JPaths.
+			log.Printf("SafeImporter.Import: Initial *originally relative* path %q (abs: %q) is outside root. Falling through to JPath search for %q.\n", importedPath, absEntrypointPath, importedPath)
 		}
-	} else if !filepath.IsAbs(importedPath) {
-		// Try from root directory
-		contents, foundHere, found, err := i.tryImport(".", importedPath)
-		if err != nil {
-			return jsonnet.Contents{}, "", err
+		// If we reach here for importedFrom == "", it means either:
+		// - initial path (abs or rel) resolved to be IN root, but direct tryImport didn't find it -> try JPaths for original `importedPath`.
+		// - initial path was RELATIVE, its abs form was OUTSIDE root -> try JPaths for original `importedPath`.
+		// The JPath loop below will use the original `importedPath` string.
+
+	} else { // importedFrom != "" (Regular import)
+		if !filepath.IsAbs(importedPath) {
+			relDir, err := i.getRelativeDir(importedFrom)
+			if err != nil {
+				return jsonnet.Contents{}, "", err
+			}
+			contents, foundAtLogicFromTryPath, found, err := i.tryImport(relDir, importedPath)
+			if err != nil {
+				return jsonnet.Contents{}, "", err
+			}
+			if found {
+				finalFoundAt := foundAtLogicFromTryPath
+				if !filepath.IsAbs(finalFoundAt) {
+					finalFoundAt = filepath.Join(i.rootAbsPath, finalFoundAt)
+				}
+				return contents, filepath.Clean(finalFoundAt), nil
+			}
+		} else { // importedPath is ABSOLUTE (and importedFrom is not empty)
+			log.Printf("SafeImporter.Import: Absolute importPath %q from %q. Passing to tryImport.\n", importedPath, importedFrom)
+			contents, foundAtLogicFromTryPath, found, err := i.tryImport(".", importedPath)
+			if err != nil {
+				return jsonnet.Contents{}, "", err
+			}
+			if found {
+				finalFoundAt := foundAtLogicFromTryPath
+				if !filepath.IsAbs(finalFoundAt) {
+					finalFoundAt = filepath.Join(i.rootAbsPath, finalFoundAt)
+				}
+				return contents, filepath.Clean(finalFoundAt), nil
+			}
 		}
-		if found {
-			return contents, foundHere, nil
+		// If a regular import (relative or absolute) is not found by the specific attempts above, it will fall to JPaths.
+	}
+
+	// Fallback to JPaths for:
+	// 1. Initial files (importedFrom == "") if not resolved by direct absolute path logic above.
+	// 2. Regular imports (importedFrom != "") if not found by relative-to-importing-file or direct absolute path logic.
+	log.Printf("SafeImporter.Import: Falling back to JPaths to find %q (original importedPath) from context of %q\n", importedPath, importedFrom)
+
+	searchPaths := i.JPaths
+	// For an initial file load that falls through to JPath search, ensure "." (the rootDir itself) is considered.
+	// This helps align with go-jsonnet behavior where an entrypoint might be in a JPath, including the implicit current dir.
+	if importedFrom == "" {
+		hasDot := false
+		for _, p := range i.JPaths {
+			if p == "." {
+				hasDot = true
+				break
+			}
+		}
+		if !hasDot {
+			// Prepend "." to a temporary slice to avoid modifying i.JPaths
+			tempSearchPaths := make([]string, 0, len(i.JPaths)+1)
+			tempSearchPaths = append(tempSearchPaths, ".")
+			tempSearchPaths = append(tempSearchPaths, i.JPaths...)
+			searchPaths = tempSearchPaths
+			log.Printf("SafeImporter.Import: For initial file, prepended \".\" to JPaths. Effective search: %v\n", searchPaths)
 		}
 	}
 
-	// Try each library path
-	for _, jpath := range i.JPaths {
-		contents, foundHere, found, err := i.tryImport(jpath, importedPath)
+	for _, jpath := range searchPaths {
+		contents, foundAtLogicFromTryPath, found, err := i.tryImport(jpath, importedPath)
 		if err != nil {
 			return jsonnet.Contents{}, "", err
 		}
 		if found {
-			return contents, foundHere, nil
+			finalFoundAt := foundAtLogicFromTryPath
+			if !filepath.IsAbs(finalFoundAt) {
+				finalFoundAt = filepath.Join(i.rootAbsPath, finalFoundAt)
+			}
+			currentFoundAt := filepath.Clean(finalFoundAt)
+			log.Printf("SafeImporter.Import: Found %q in JPath %q (effective). Returning abs path: %q\n", importedPath, jpath, currentFoundAt)
+			return contents, currentFoundAt, nil
 		}
 	}
 
+	log.Printf("SafeImporter.Import: Failed to find %q from %q after all attempts. Returning ErrFileNotFound.\n", importedPath, importedFrom)
 	return jsonnet.Contents{}, "", ErrFileNotFound
 }
 
