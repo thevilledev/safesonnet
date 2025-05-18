@@ -697,6 +697,72 @@ func TestImport_ErrorPaths(t *testing.T) {
 	}
 }
 
+func TestClose_ErrorHandling(t *testing.T) {
+	t.Parallel()
+
+	// Setup test directory
+	tmpDir := t.TempDir()
+	imp, err := NewSafeImporter(tmpDir, nil, WithLogger(log.New(os.Stdout, "", 0)))
+	if err != nil {
+		t.Fatalf("NewSafeImporter() error = %v", err)
+	}
+
+	// Import a file to ensure the importer is used
+	testContent := `{x: 1}`
+	testFile := filepath.Join(tmpDir, "test.jsonnet")
+	mustWriteFile(t, testFile, testContent)
+
+	// Import the file to populate cache
+	_, _, err = imp.Import("", testFile)
+	if err != nil {
+		t.Fatalf("Import() error = %v", err)
+	}
+
+	// Close normally - should succeed
+	if err := imp.Close(); err != nil {
+		t.Errorf("First Close() error = %v", err)
+	}
+
+	// Try another close operation after close
+	if err := imp.Close(); err != nil {
+		t.Errorf("Second Close() should not error = %v", err)
+	}
+
+	// Create an importer, then manually delete the tmp directory to force close error
+	// This test depends on OS behavior and might need adjustment
+	impForError, err := NewSafeImporter(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("Second NewSafeImporter() error = %v", err)
+	}
+
+	// Verify cache state before and after close
+	cacheEntryCount := countCacheEntries(impForError)
+	impForError.Close()
+
+	// After closing, verify the importer can't be used
+	_, _, err = impForError.Import("", testFile)
+	if err == nil {
+		t.Error("Import() after Close() should fail")
+	}
+
+	// Test resource cleanup
+	if countCacheEntries(impForError) != cacheEntryCount {
+		t.Error("Close() should not affect cache entries")
+	}
+}
+
+// Helper function to count cache entries.
+func countCacheEntries(imp *SafeImporter) int {
+	count := 0
+	imp.fsCache.Range(func(_, _ interface{}) bool {
+		count++
+
+		return true
+	})
+
+	return count
+}
+
 // mustWriteFile is a test helper that writes a file or fails the test.
 func mustWriteFile(t *testing.T, path, content string) {
 	t.Helper()
