@@ -23,7 +23,6 @@ linters:
     - fatcontext
     - forbidigo
     - forcetypeassert
-    - ginkgolinter
     - gocheckcompilerdirectives
     - gochecknoglobals
     - gochecknoinits
@@ -65,14 +64,11 @@ linters:
     - perfsprint
     - prealloc
     - predeclared
-    - promlinter
-    - protogetter
     - reassign
     - revive
     - rowserrcheck
     - sloglint
     - spancheck
-    - sqlclosecheck
     - staticcheck
     - tagalign
     - tagliatelle
@@ -87,7 +83,6 @@ linters:
     - whitespace
     - zerologlint
   disable:
-    - cyclop
     - funlen
     - gocognit
     - nestif
@@ -95,8 +90,8 @@ linters:
     - varnamelen
     - wsl
   settings:
-    cyclop:
-      max-complexity: 12
+    gocyclo:
+      min-complexity: 10
     depguard:
       rules:
         main:

@@ -541,8 +541,17 @@ func TestTryPath(t *testing.T) {
 	}
 	defer imp.Close()
 
-	// Test successful lookup
-	found, contents, foundAt, err := imp.tryPath(".", "test.jsonnet")
+	// Run individual test cases
+	testSuccessfulLookup(t, imp)
+	testCaching(t, imp, tmpDir)
+	testNonExistentFile(t, imp)
+	testAbsolutePathOutsideRoot(t, imp)
+	testPathTraversal(t, imp)
+}
+
+func testSuccessfulLookup(t *testing.T, imp *SafeImporter) {
+	t.Helper()
+	found, contents, _, err := imp.tryPath(".", "test.jsonnet")
 	if err != nil {
 		t.Errorf("tryPath() for existing file error = %v", err)
 	}
@@ -552,6 +561,12 @@ func TestTryPath(t *testing.T) {
 	if contents.String() != `{"x": 1}` {
 		t.Errorf("tryPath() contents = %v, want %v", contents.String(), `{"x": 1}`)
 	}
+}
+
+func testCaching(t *testing.T, imp *SafeImporter, tmpDir string) {
+	t.Helper()
+	// Get initial content for comparison
+	_, contents, foundAt, _ := imp.tryPath(".", "test.jsonnet")
 
 	// Test caching by removing the file and trying to access it again
 	if err := os.Remove(filepath.Join(tmpDir, "test.jsonnet")); err != nil {
@@ -571,8 +586,10 @@ func TestTryPath(t *testing.T) {
 	if foundAt2 != foundAt {
 		t.Errorf("tryPath() cached foundAt = %v, want %v", foundAt2, foundAt)
 	}
+}
 
-	// Test non-existent file
+func testNonExistentFile(t *testing.T, imp *SafeImporter) {
+	t.Helper()
 	found3, _, _, err3 := imp.tryPath(".", "nonexistent.jsonnet")
 	if err3 != nil {
 		t.Errorf("tryPath() for non-existent file error = %v", err3)
@@ -580,8 +597,10 @@ func TestTryPath(t *testing.T) {
 	if found3 {
 		t.Errorf("tryPath() found non-existent file")
 	}
+}
 
-	// Test absolute path outside root
+func testAbsolutePathOutsideRoot(t *testing.T, imp *SafeImporter) {
+	t.Helper()
 	outsideDir := t.TempDir()
 	found4, _, _, err4 := imp.tryPath(".", outsideDir)
 	if err4 == nil {
@@ -590,8 +609,10 @@ func TestTryPath(t *testing.T) {
 	if found4 {
 		t.Errorf("tryPath() found outside path which should be forbidden")
 	}
+}
 
-	// Test path traversal
+func testPathTraversal(t *testing.T, imp *SafeImporter) {
+	t.Helper()
 	found5, _, _, err5 := imp.tryPath(".", "../../../etc/passwd")
 	if err5 == nil {
 		t.Errorf("tryPath() for path traversal should have failed")
