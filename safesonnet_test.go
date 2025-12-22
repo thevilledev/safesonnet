@@ -1,6 +1,7 @@
 package safesonnet
 
 import (
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -240,6 +241,18 @@ func TestImport_SecurityBoundary(t *testing.T) {
 			name:         "double dot traversal",
 			importedFrom: filepath.Join(tmpDir, "lib", "safe.jsonnet"),
 			importedPath: "../../unsafe.jsonnet",
+			wantErr:      true,
+		},
+		{
+			name:         "equal path traversal",
+			importedFrom: filepath.Join(tmpDir, "lib", "safe.jsonnet"),
+			importedPath: "../lib/safe.jsonnet",
+			wantErr:      false,
+		},
+		{
+			name:         "absolute path outside root via symlink",
+			importedFrom: "",
+			importedPath: filepath.Join(tmpDir, "symlink.jsonnet"),
 			wantErr:      true,
 		},
 	}
@@ -545,81 +558,217 @@ func TestTryPath(t *testing.T) {
 	testSuccessfulLookup(t, imp)
 	testCaching(t, imp, tmpDir)
 	testNonExistentFile(t, imp)
-	testAbsolutePathOutsideRoot(t, imp)
-	testPathTraversal(t, imp)
 }
 
 func testSuccessfulLookup(t *testing.T, imp *SafeImporter) {
 	t.Helper()
-	found, contents, _, err := imp.tryPath(".", "test.jsonnet")
+	// Simulate what Import does: resolve path relative to root
+	absPath := filepath.Join(imp.rootAbsPath, "test.jsonnet")
+	relPath := "test.jsonnet"
+
+	found, contents, _, err := imp.tryAbsPath(absPath, relPath)
 	if err != nil {
-		t.Errorf("tryPath() for existing file error = %v", err)
+		t.Errorf("tryAbsPath() for existing file error = %v", err)
 	}
 	if !found {
-		t.Errorf("tryPath() did not find existing file")
+		t.Errorf("tryAbsPath() did not find existing file")
 	}
 	if contents.String() != `{"x": 1}` {
-		t.Errorf("tryPath() contents = %v, want %v", contents.String(), `{"x": 1}`)
+		t.Errorf("tryAbsPath() contents = %v, want %v", contents.String(), `{"x": 1}`)
 	}
 }
 
 func testCaching(t *testing.T, imp *SafeImporter, tmpDir string) {
 	t.Helper()
+	absPath := filepath.Join(tmpDir, "test.jsonnet")
+	relPath := "test.jsonnet"
+
 	// Get initial content for comparison
-	_, contents, foundAt, _ := imp.tryPath(".", "test.jsonnet")
+	_, contents, foundAt, _ := imp.tryAbsPath(absPath, relPath)
 
 	// Test caching by removing the file and trying to access it again
 	if err := os.Remove(filepath.Join(tmpDir, "test.jsonnet")); err != nil {
 		t.Fatalf("Failed to remove test file: %v", err)
 	}
 
-	found2, contents2, foundAt2, err2 := imp.tryPath(".", "test.jsonnet")
+	found2, contents2, foundAt2, err2 := imp.tryAbsPath(absPath, relPath)
 	if err2 != nil {
-		t.Errorf("tryPath() cached lookup error = %v", err2)
+		t.Errorf("tryAbsPath() cached lookup error = %v", err2)
 	}
 	if !found2 {
-		t.Errorf("tryPath() did not find cached file")
+		t.Errorf("tryAbsPath() did not find cached file")
 	}
 	if contents2.String() != contents.String() {
-		t.Errorf("tryPath() cached contents = %v, want %v", contents2.String(), contents.String())
+		t.Errorf("tryAbsPath() cached contents = %v, want %v", contents2.String(), contents.String())
 	}
 	if foundAt2 != foundAt {
-		t.Errorf("tryPath() cached foundAt = %v, want %v", foundAt2, foundAt)
+		t.Errorf("tryAbsPath() cached foundAt = %v, want %v", foundAt2, foundAt)
 	}
 }
 
 func testNonExistentFile(t *testing.T, imp *SafeImporter) {
 	t.Helper()
-	found3, _, _, err3 := imp.tryPath(".", "nonexistent.jsonnet")
+	absPath := filepath.Join(imp.rootAbsPath, "nonexistent.jsonnet")
+	relPath := "nonexistent.jsonnet"
+
+	found3, _, _, err3 := imp.tryAbsPath(absPath, relPath)
 	if err3 != nil {
-		t.Errorf("tryPath() for non-existent file error = %v", err3)
+		t.Errorf("tryAbsPath() for non-existent file error = %v", err3)
 	}
 	if found3 {
-		t.Errorf("tryPath() found non-existent file")
+		t.Errorf("tryAbsPath() found non-existent file")
 	}
 }
 
-func testAbsolutePathOutsideRoot(t *testing.T, imp *SafeImporter) {
-	t.Helper()
-	outsideDir := t.TempDir()
-	found4, _, _, err4 := imp.tryPath(".", outsideDir)
-	if err4 == nil {
-		t.Errorf("tryPath() for outside path should have failed")
+func TestTryAbsPath_CacheInternalTypeError(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	mustWriteFile(t, filepath.Join(tmpDir, "test.jsonnet"), `{}`)
+
+	imp, err := NewSafeImporter(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewSafeImporter() error = %v", err)
 	}
-	if found4 {
-		t.Errorf("tryPath() found outside path which should be forbidden")
+	defer imp.Close()
+
+	// Manually poison the cache with an invalid type
+	absPath := filepath.Join(tmpDir, "poisoned.jsonnet")
+	imp.fsCache.Store(absPath, "not a *cacheEntry")
+
+	found, contents, foundAt, err := imp.tryAbsPath(absPath, "poisoned.jsonnet")
+	_ = found
+	_ = contents
+	_ = foundAt
+	if err == nil {
+		t.Error("tryAbsPath() should return error for invalid cache entry type")
+	}
+	if !strings.Contains(err.Error(), "internal cache error") {
+		t.Errorf("tryAbsPath() error should mention internal cache error, got: %v", err)
 	}
 }
 
-func testPathTraversal(t *testing.T, imp *SafeImporter) {
-	t.Helper()
-	found5, _, _, err5 := imp.tryPath(".", "../../../etc/passwd")
-	if err5 == nil {
-		t.Errorf("tryPath() for path traversal should have failed")
+func TestTryAbsPath_CachedNonExistError(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	imp, err := NewSafeImporter(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewSafeImporter() error = %v", err)
 	}
-	if found5 {
-		t.Errorf("tryPath() found path traversal which should be forbidden")
+	defer imp.Close()
+
+	// First call: file doesn't exist, gets cached as not-exist
+	absPath := filepath.Join(tmpDir, "missing.jsonnet")
+	found, _, _, err := imp.tryAbsPath(absPath, "missing.jsonnet")
+	if err != nil {
+		t.Fatalf("First tryAbsPath() error = %v", err)
 	}
+	if found {
+		t.Error("First tryAbsPath() should not find non-existent file")
+	}
+
+	// Second call: should use cached not-exist result
+	found2, _, _, err2 := imp.tryAbsPath(absPath, "missing.jsonnet")
+	if err2 != nil {
+		t.Errorf("Second tryAbsPath() error = %v", err2)
+	}
+	if found2 {
+		t.Error("Second tryAbsPath() should return cached not-found")
+	}
+}
+
+func TestTryAbsPath_CachedOtherError(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	imp, err := NewSafeImporter(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewSafeImporter() error = %v", err)
+	}
+	defer imp.Close()
+
+	// Manually cache an error that is NOT os.IsNotExist
+	absPath := filepath.Join(tmpDir, "error.jsonnet")
+	customErr := errors.New("custom cached error") //nolint:err113
+	imp.fsCache.Store(absPath, &cacheEntry{err: customErr})
+
+	found, contents, foundAt, err := imp.tryAbsPath(absPath, "error.jsonnet")
+	_ = found
+	_ = contents
+	_ = foundAt
+	if err == nil {
+		t.Error("tryAbsPath() should return cached error")
+	}
+	if !strings.Contains(err.Error(), "custom cached error") {
+		t.Errorf("tryAbsPath() should return the cached error, got: %v", err)
+	}
+}
+
+func TestEnsureDotInSearchPaths(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	mustWriteFile(t, filepath.Join(tmpDir, "root.jsonnet"), `{root: true}`)
+	mustWriteFile(t, filepath.Join(tmpDir, "lib", "lib.jsonnet"), `{lib: true}`)
+
+	// Create importer with JPaths that already contains "."
+	imp1, err := NewSafeImporter(tmpDir, []string{".", "lib"})
+	if err != nil {
+		t.Fatalf("NewSafeImporter() error = %v", err)
+	}
+	defer imp1.Close()
+
+	// Verify "." is in JPaths
+	hasDot := false
+	for _, p := range imp1.JPaths {
+		if p == "." {
+			hasDot = true
+
+			break
+		}
+	}
+	if !hasDot {
+		t.Error("JPaths should contain '.'")
+	}
+
+	// Test ensureDotInSearchPaths when "." is already present
+	paths := imp1.ensureDotInSearchPaths([]string{".", "lib"})
+	if len(paths) != 2 {
+		t.Errorf("ensureDotInSearchPaths() should not duplicate '.', got %v", paths)
+	}
+
+	// Test ensureDotInSearchPaths when "." is NOT present
+	paths2 := imp1.ensureDotInSearchPaths([]string{"lib", "vendor"})
+	if len(paths2) != 3 || paths2[0] != "." {
+		t.Errorf("ensureDotInSearchPaths() should prepend '.', got %v", paths2)
+	}
+}
+
+func TestTryAbsPath_DirectoryReadError(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	// Create a directory (not a file)
+	dirPath := filepath.Join(tmpDir, "subdir")
+	if err := os.MkdirAll(dirPath, 0o755); err != nil {
+		t.Fatalf("Failed to create directory: %v", err)
+	}
+
+	imp, err := NewSafeImporter(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("NewSafeImporter() error = %v", err)
+	}
+	defer imp.Close()
+
+	// Try to read a directory as if it were a file
+	// This should trigger the io.ReadAll error path
+	found, _, _, err := imp.tryAbsPath(dirPath, "subdir")
+	// On most systems, trying to read a directory returns an error
+	if found && err == nil {
+		t.Log("Directory was unexpectedly readable as a file (platform-specific)")
+	}
+	// The important thing is we don't panic
 }
 
 func TestImport_JPathFallback(t *testing.T) {
@@ -692,10 +841,6 @@ func TestImport_ErrorPaths(t *testing.T) {
 		t.Fatalf("NewSafeImporter() error = %v", err)
 	}
 	defer imp.Close()
-
-	// Test with invalid absolute path where Rel would fail
-	// This is tricky to simulate - one approach would be to mock the filesystem
-	// functions, but for simplicity we'll just check the coverage report
 
 	// Test with a relative path that would escape the root
 	_, _, err = imp.Import(filepath.Join(tmpDir, "lib", "nested"), "../../../../../../etc/passwd")

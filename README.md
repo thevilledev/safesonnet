@@ -23,9 +23,10 @@ See [example](example/) directory for a complete working example.
 Basic usage:
 
 ```go
-importer, err := safesonnet.NewSafeImporter("jsonnet", []string{
-    filepath.Join("jsonnet", "lib"), // Library path relative to workspace
-})
+	rootDir := "jsonnet"
+	importer, err := safesonnet.NewSafeImporter(rootDir, []string{
+		"lib", // Library path relative to rootDir
+	})
 if err != nil {
     log.Fatal(err)
 }

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 
 	"github.com/google/go-jsonnet"
 	"github.com/thevilledev/safesonnet"
@@ -30,7 +29,7 @@ func run() error {
 	// Create a new SafeImporter with root directory and library paths
 	rootDir := "jsonnet"
 	importer, err := safesonnet.NewSafeImporter(rootDir, []string{
-		filepath.Join(rootDir, "lib"), // Library path relative to workspace
+		"lib", // Library path relative to rootDir
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create importer: %w", err)
