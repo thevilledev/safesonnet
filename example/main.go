@@ -7,7 +7,7 @@ import (
 	"os"
 
 	"github.com/google/go-jsonnet"
-	"github.com/thevilledev/safesonnet"
+	"github.com/thevilledev/safesonnet/v2"
 )
 
 const jsonnetCode = `

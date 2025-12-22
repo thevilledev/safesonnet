@@ -1,8 +1,8 @@
 # SafeSonnet
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/thevilledev/safesonnet.svg)](https://pkg.go.dev/github.com/thevilledev/safesonnet)
-[![test](https://github.com/thevilledev/go-thespine/actions/workflows/ci.yaml/badge.svg)](https://github.com/thevilledev/safesonnet/actions/workflows/ci.yaml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/thevilledev/safesonnet)](https://goreportcard.com/report/github.com/thevilledev/safesonnet)
+[![Go Reference](https://pkg.go.dev/badge/github.com/thevilledev/safesonnet/v2.svg)](https://pkg.go.dev/github.com/thevilledev/safesonnet/v2)
+[![test](https://github.com/thevilledev/safesonnet/actions/workflows/ci.yaml/badge.svg)](https://github.com/thevilledev/safesonnet/actions/workflows/ci.yaml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/thevilledev/safesonnet/v2)](https://goreportcard.com/report/github.com/thevilledev/safesonnet/v2)
 
 SafeSonnet is a secure file importer for [google/go-jsonnet](https://github.com/google/go-jsonnet) that restricts file imports to a specific directory using `os.Root` functionality [introduced in Go 1.24](https://tip.golang.org/doc/go1.24#directory-limited-filesystem-access). This helps prevent path traversal attacks and ensures that Jsonnet imports can only access files within a designated directory.
 
@@ -11,7 +11,7 @@ See [docs/spec.md](docs/spec.md) for the full specification, with differences to
 ## Installation
 
 ```bash
-go get github.com/thevilledev/safesonnet
+go get github.com/thevilledev/safesonnet/v2
 ```
 
 Requires Go 1.24.

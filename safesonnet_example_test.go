@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/google/go-jsonnet"
-	"github.com/thevilledev/safesonnet"
+	"github.com/thevilledev/safesonnet/v2"
 )
 
 func Example() {
