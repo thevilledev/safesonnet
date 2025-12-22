@@ -60,6 +60,7 @@ linters:
     - nolintlint
     - nonamedreturns
     - nosprintfhostport
+    - modernize
     - paralleltest
     - perfsprint
     - prealloc

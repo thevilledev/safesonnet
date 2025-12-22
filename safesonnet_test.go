@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -720,14 +721,7 @@ func TestEnsureDotInSearchPaths(t *testing.T) {
 	defer imp1.Close()
 
 	// Verify "." is in JPaths
-	hasDot := false
-	for _, p := range imp1.JPaths {
-		if p == "." {
-			hasDot = true
-
-			break
-		}
-	}
+	hasDot := slices.Contains(imp1.JPaths, ".")
 	if !hasDot {
 		t.Error("JPaths should contain '.'")
 	}
@@ -920,7 +914,7 @@ func TestClose_ErrorHandling(t *testing.T) {
 // Helper function to count cache entries.
 func countCacheEntries(imp *SafeImporter) int {
 	count := 0
-	imp.fsCache.Range(func(_, _ interface{}) bool {
+	imp.fsCache.Range(func(_, _ any) bool {
 		count++
 
 		return true

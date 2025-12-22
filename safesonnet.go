@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -266,14 +267,7 @@ func (s *SafeImporter) searchJPaths(importedFrom, importedPath string) (jsonnet.
 }
 
 func (s *SafeImporter) ensureDotInSearchPaths(paths []string) []string {
-	hasDot := false
-	for _, p := range paths {
-		if p == "." {
-			hasDot = true
-
-			break
-		}
-	}
+	hasDot := slices.Contains(paths, ".")
 	if !hasDot {
 		return append([]string{"."}, paths...)
 	}
