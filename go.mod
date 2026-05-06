@@ -1,8 +1,8 @@
 module github.com/thevilledev/safesonnet/v2
 
-go 1.24.3
+go 1.24.5
 
-require github.com/google/go-jsonnet v0.21.0
+require github.com/google/go-jsonnet v0.22.0
 
 require (
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
