@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -266,13 +267,7 @@ func (s *SafeImporter) searchPaths(importedFrom string) []string {
 }
 
 func hasDotPath(paths []string) bool {
-	for _, path := range paths {
-		if path == "." {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(paths, ".")
 }
 
 func (s *SafeImporter) loadFile(absPath, relPath string) (jsonnet.Contents, string, bool, error) {
