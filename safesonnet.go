@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 
@@ -44,7 +43,8 @@ type SafeImporter struct {
 	JPaths      []string
 	root        *os.Root
 	rootAbsPath string
-	fsCache     sync.Map
+	cacheMu     sync.RWMutex
+	fsCache     map[string]cacheEntry
 	logger      *log.Logger
 }
 
@@ -83,7 +83,7 @@ func NewSafeImporter(rootDir string, jpaths []string, opts ...Option) (*SafeImpo
 		return nil, fmt.Errorf("%w: %w", ErrOpenRootDir, err)
 	}
 
-	cleanJPaths, err := processJPaths(jpaths, rootAbs, root)
+	cleanJPaths, err := processJPaths(jpaths, rootAbs)
 	if err != nil {
 		root.Close()
 
@@ -94,6 +94,7 @@ func NewSafeImporter(rootDir string, jpaths []string, opts ...Option) (*SafeImpo
 		JPaths:      cleanJPaths,
 		root:        root,
 		rootAbsPath: rootAbs,
+		fsCache:     make(map[string]cacheEntry),
 		logger:      log.New(io.Discard, "", 0),
 	}
 	for _, o := range opts {
@@ -103,14 +104,13 @@ func NewSafeImporter(rootDir string, jpaths []string, opts ...Option) (*SafeImpo
 	return si, nil
 }
 
-func processJPaths(jpaths []string, rootAbs string, root *os.Root) ([]string, error) {
-	cleanJPaths := make([]string, 0, len(jpaths)+1)
-	effectiveJPaths := jpaths
+func processJPaths(jpaths []string, rootAbs string) ([]string, error) {
 	if len(jpaths) == 0 {
-		effectiveJPaths = []string{"."}
+		return []string{"."}, nil
 	}
 
-	for _, jp := range effectiveJPaths {
+	cleanJPaths := make([]string, 0, len(jpaths))
+	for _, jp := range jpaths {
 		if jp == "" {
 			continue
 		}
@@ -118,7 +118,7 @@ func processJPaths(jpaths []string, rootAbs string, root *os.Root) ([]string, er
 			return nil, fmt.Errorf("%w: jpath %q", ErrInvalidNullByte, jp)
 		}
 
-		rel, err := resolveJPath(jp, rootAbs, root)
+		rel, err := resolveJPath(jp, rootAbs)
 		if err != nil {
 			return nil, err
 		}
@@ -133,18 +133,18 @@ func processJPaths(jpaths []string, rootAbs string, root *os.Root) ([]string, er
 	return cleanJPaths, nil
 }
 
-func resolveJPath(jp, rootAbs string, root *os.Root) (string, error) {
+func resolveJPath(jp, rootAbs string) (string, error) {
 	absJP := jp
 	if !filepath.IsAbs(jp) {
 		absJP = filepath.Join(rootAbs, jp)
 	}
 	absJP = filepath.Clean(absJP)
 
-	rel, err := filepath.Rel(rootAbs, absJP)
-	if err != nil || strings.HasPrefix(rel, "..") || (strings.HasPrefix(rel, "/") && rel != ".") {
+	rel, inside, err := relToRoot(rootAbs, absJP)
+	if err != nil || !inside {
 		return "", fmt.Errorf(
 			"%w: jpath %q (interpreted as %q) is outside root directory %q (resolved to %q)",
-			ErrJPathOutsideRoot, jp, absJP, root.Name(), rootAbs)
+			ErrJPathOutsideRoot, jp, absJP, rootAbs, rootAbs)
 	}
 
 	return rel, nil
@@ -160,7 +160,6 @@ func (s *SafeImporter) Import(importedFrom, importedPath string) (jsonnet.Conten
 		return jsonnet.Contents{}, "", fmt.Errorf("%w: importedFrom %q", ErrInvalidNullByte, importedFrom)
 	}
 
-	// 1. Try primary candidate (direct import)
 	contents, foundAt, found, err := s.tryPrimaryImport(importedFrom, importedPath)
 	if err != nil {
 		return jsonnet.Contents{}, "", err
@@ -169,7 +168,6 @@ func (s *SafeImporter) Import(importedFrom, importedPath string) (jsonnet.Conten
 		return contents, foundAt, nil
 	}
 
-	// 2. Try JPaths
 	return s.searchJPaths(importedFrom, importedPath)
 }
 
@@ -179,10 +177,11 @@ func (s *SafeImporter) tryPrimaryImport(importedFrom, importedPath string) (json
 		return jsonnet.Contents{}, "", false, err
 	}
 
-	rel, err := filepath.Rel(s.rootAbsPath, primaryCandidate)
-	isOutside := err != nil || strings.HasPrefix(rel, "..") || (strings.HasPrefix(rel, "/") && rel != ".")
-
-	if isOutside {
+	rel, inside, err := relToRoot(s.rootAbsPath, primaryCandidate)
+	if err != nil {
+		return jsonnet.Contents{}, "", false, err
+	}
+	if !inside {
 		if isAbsImport {
 			return jsonnet.Contents{}, "", false, fmt.Errorf(
 				"%w: path %q (resolved to %q) is outside root directory %q",
@@ -198,17 +197,11 @@ func (s *SafeImporter) tryPrimaryImport(importedFrom, importedPath string) (json
 				s.rootAbsPath,
 			)
 		}
-		// Initial relative import outside root -> Fallback to JPaths
+
 		return jsonnet.Contents{}, "", false, nil
 	}
 
-	// Inside root.
-	found, contents, foundAt, err := s.tryAbsPath(primaryCandidate, rel)
-	if err != nil {
-		return jsonnet.Contents{}, "", false, err
-	}
-
-	return contents, foundAt, found, nil
+	return s.loadFile(primaryCandidate, rel)
 }
 
 func (s *SafeImporter) resolveImportPath(importedFrom, importedPath string) (string, bool, error) {
@@ -240,21 +233,16 @@ func (s *SafeImporter) resolveImportPath(importedFrom, importedPath string) (str
 }
 
 func (s *SafeImporter) searchJPaths(importedFrom, importedPath string) (jsonnet.Contents, string, error) {
-	searchPaths := s.JPaths
-	if importedFrom == "" {
-		searchPaths = s.ensureDotInSearchPaths(searchPaths)
-	}
-
-	for _, jp := range searchPaths {
+	for _, jp := range s.searchPaths(importedFrom) {
 		candidate := filepath.Join(s.rootAbsPath, jp, importedPath)
 		candidate = filepath.Clean(candidate)
 
-		rel, err := filepath.Rel(s.rootAbsPath, candidate)
-		if err != nil || strings.HasPrefix(rel, "..") || (strings.HasPrefix(rel, "/") && rel != ".") {
+		rel, inside, err := relToRoot(s.rootAbsPath, candidate)
+		if err != nil || !inside {
 			continue
 		}
 
-		found, contents, foundAt, err := s.tryAbsPath(candidate, rel)
+		contents, foundAt, found, err := s.loadFile(candidate, rel)
 		if err != nil {
 			return jsonnet.Contents{}, "", err
 		}
@@ -266,56 +254,96 @@ func (s *SafeImporter) searchJPaths(importedFrom, importedPath string) (jsonnet.
 	return jsonnet.Contents{}, "", ErrFileNotFound
 }
 
-func (s *SafeImporter) ensureDotInSearchPaths(paths []string) []string {
-	hasDot := slices.Contains(paths, ".")
-	if !hasDot {
-		return append([]string{"."}, paths...)
+func (s *SafeImporter) searchPaths(importedFrom string) []string {
+	if importedFrom != "" || hasDotPath(s.JPaths) {
+		return s.JPaths
 	}
 
-	return paths
+	paths := make([]string, 0, len(s.JPaths)+1)
+	paths = append(paths, ".")
+
+	return append(paths, s.JPaths...)
 }
 
-func (s *SafeImporter) tryAbsPath(absPath, relPath string) (bool, jsonnet.Contents, string, error) {
-	if val, ok := s.fsCache.Load(absPath); ok {
-		entry, ok := val.(*cacheEntry)
-		if !ok {
-			return false, jsonnet.Contents{}, "", ErrCacheInternalType
+func hasDotPath(paths []string) bool {
+	for _, path := range paths {
+		if path == "." {
+			return true
 		}
-		if entry.err != nil {
-			if os.IsNotExist(entry.err) {
-				return false, jsonnet.Contents{}, "", nil
-			}
+	}
 
-			return false, jsonnet.Contents{}, "", entry.err
-		}
+	return false
+}
 
-		return true, entry.contents, entry.foundAt, nil
+func (s *SafeImporter) loadFile(absPath, relPath string) (jsonnet.Contents, string, bool, error) {
+	if entry, ok := s.cached(absPath); ok {
+		return entry.result()
 	}
 
 	f, err := s.root.Open(relPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			s.fsCache.Store(absPath, &cacheEntry{err: err})
+			s.cache(absPath, cacheEntry{err: err})
 
-			return false, jsonnet.Contents{}, "", nil
+			return jsonnet.Contents{}, "", false, nil
 		}
 
-		return false, jsonnet.Contents{}, "", fmt.Errorf("%w: %q: %w", ErrReadFile, relPath, err)
+		return jsonnet.Contents{}, "", false, fmt.Errorf("%w: %q: %w", ErrReadFile, relPath, err)
 	}
 	defer f.Close()
 
 	data, err := io.ReadAll(f)
 	if err != nil {
-		return false, jsonnet.Contents{}, "", fmt.Errorf("%w: %q: %w", ErrReadFile, relPath, err)
+		return jsonnet.Contents{}, "", false, fmt.Errorf("%w: %q: %w", ErrReadFile, relPath, err)
 	}
 
 	contents := jsonnet.MakeContents(string(data))
-	s.fsCache.Store(absPath, &cacheEntry{
+	s.cache(absPath, cacheEntry{
 		contents: contents,
 		foundAt:  absPath,
 	})
 
-	return true, contents, absPath, nil
+	return contents, absPath, true, nil
+}
+
+func (s *SafeImporter) cached(absPath string) (cacheEntry, bool) {
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+
+	entry, ok := s.fsCache[absPath]
+
+	return entry, ok
+}
+
+func (s *SafeImporter) cache(absPath string, entry cacheEntry) {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+
+	s.fsCache[absPath] = entry
+}
+
+func (e cacheEntry) result() (jsonnet.Contents, string, bool, error) {
+	if e.err != nil {
+		if os.IsNotExist(e.err) {
+			return jsonnet.Contents{}, "", false, nil
+		}
+
+		return jsonnet.Contents{}, "", false, e.err
+	}
+
+	return e.contents, e.foundAt, true, nil
+}
+
+func relToRoot(rootAbs, absPath string) (string, bool, error) {
+	rel, err := filepath.Rel(rootAbs, filepath.Clean(absPath))
+	if err != nil {
+		return "", false, err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return rel, false, nil
+	}
+
+	return rel, true, nil
 }
 
 func (s *SafeImporter) Close() error {
@@ -324,19 +352,4 @@ func (s *SafeImporter) Close() error {
 	}
 
 	return nil
-}
-
-func (s *SafeImporter) getRelativeDir(importedFrom string) (string, error) {
-	if strings.Contains(importedFrom, "\x00") {
-		return "", fmt.Errorf("%w: importedFrom %q", ErrInvalidNullByte, importedFrom)
-	}
-	if !filepath.IsAbs(importedFrom) {
-		return filepath.Dir(importedFrom), nil
-	}
-	rel, err := filepath.Rel(s.rootAbsPath, filepath.Dir(importedFrom))
-	if err != nil {
-		return "", err
-	}
-
-	return rel, nil
 }
