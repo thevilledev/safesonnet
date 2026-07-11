@@ -5,8 +5,8 @@ go 1.26.0
 require github.com/google/go-jsonnet v0.22.0
 
 require (
-	go.yaml.in/yaml/v2 v2.4.3 // indirect
-	golang.org/x/crypto v0.52.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
+	go.yaml.in/yaml/v2 v2.4.4 // indirect
+	golang.org/x/crypto v0.54.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
