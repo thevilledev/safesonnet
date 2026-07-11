@@ -119,7 +119,7 @@ func TestImport_BasicFunctionality(t *testing.T) {
 		{
 			name:         "import from root",
 			importedPath: "lib.jsonnet",
-			wantContent:  `{x: 1}`,
+			wantContent:  `{x: 1}`, //nolint:goconst
 		},
 		{
 			name:         "import from library path",
@@ -136,7 +136,7 @@ func TestImport_BasicFunctionality(t *testing.T) {
 		},
 		{
 			name:         "non-existent file",
-			importedPath: "missing.jsonnet",
+			importedPath: "missing.jsonnet", //nolint:goconst
 			wantErr:      true,
 		},
 	}
@@ -353,9 +353,7 @@ func TestImport_Concurrency(t *testing.T) {
 	numGoroutines := 32
 
 	for range numGoroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			importedContent, foundAt, importErr := imp.Import("", filePath)
 			if importErr != nil {
 				t.Errorf("imp.Import() failed in goroutine: %v", importErr)
@@ -368,7 +366,7 @@ func TestImport_Concurrency(t *testing.T) {
 			if foundAt != filePath {
 				t.Errorf("imp.Import() returned wrong foundAt in goroutine: got %q, want %q", foundAt, filePath)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }
